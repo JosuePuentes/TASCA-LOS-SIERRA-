@@ -11,6 +11,8 @@ const state = {
   reads: [],
   products: [],
   editingProduct: null,
+  editingCombo: null,
+  comboParts: [],
   currentTicket: null,
   cart: [],
   delivery: null,
@@ -543,7 +545,9 @@ function updatePackHint() {
 
 function inventoryView() {
   const editing = state.editingProduct;
-  const products = state.products;
+  const combo = state.editingCombo;
+  const products = state.products.filter((product) => !product.isCombo);
+  const combos = state.products.filter((product) => product.isCombo);
   const costValue = products.reduce((sum, product) => sum + product.stockCostCents, 0);
   const saleValue = products.reduce((sum, product) => sum + product.stockSaleCents, 0);
   const profitValue = products.reduce((sum, product) => sum + product.stockProfitCents, 0);
@@ -601,7 +605,87 @@ function inventoryView() {
         </div>
         ${list}
       </section>
+      <section>
+        <form class="card product-form" data-form="combo">
+          <h2>${combo ? 'Editar combo' : 'Crear combo'}</h2>
+          <p class="lead page-lead">Elige productos y cuántas unidades lleva cada uno. Al vender un combo se cobra este precio y se restan esas unidades del inventario.</p>
+          <label class="field"><span>Nombre del combo</span><input name="name" maxlength="80" required value="${esc(combo?.name || '')}" placeholder="Combo de cervezas"></label>
+          <label class="field"><span>Precio de venta</span><input name="price" inputmode="decimal" required value="${esc(combo ? moneyInput(combo.priceCents) : '')}" placeholder="0,00"></label>
+          <div class="cart-add">
+            <label class="field"><span>Producto</span><select id="combo-product">${comboProductOptions()}</select></label>
+            <label class="field"><span>Unidades en el combo</span><input id="combo-qty" type="number" min="1" max="500" value="1"></label>
+          </div>
+          <div class="row-actions">
+            <button class="btn ghost" type="button" data-action="add-combo-part">Agregar al combo</button>
+          </div>
+          <div id="combo-parts">${comboPartRows()}</div>
+          <p class="hint" id="combo-cost">${comboCostHint()}</p>
+          <label class="check"><input name="active" type="checkbox" ${combo ? (combo.active ? 'checked' : '') : 'checked'}><span>Disponible para vender en el visor</span></label>
+          <p class="form-error" hidden></p>
+          <div class="row-actions">
+            <button class="btn primary" type="submit">${combo ? 'Guardar combo' : 'Crear combo'}</button>
+            ${combo ? '<button class="btn ghost" type="button" data-action="cancel-combo">Cancelar</button>' : ''}
+          </div>
+        </form>
+        <h2>Combos</h2>
+        <p class="lead page-lead">El combo no tiene existencias propias. Alcanza para tantos como permitan los productos que lo componen.</p>
+        ${comboListHtml(combos)}
+      </section>
     </div>`;
+}
+
+function comboProductOptions() {
+  const singles = state.products.filter((product) => !product.isCombo && product.active);
+  if (!singles.length) return '<option value="">Carga productos primero</option>';
+  return singles.map((product) => `<option value="${product.id}">${esc(product.name)} · quedan ${product.stock.toLocaleString('es-ES')}</option>`).join('');
+}
+
+function comboPartRows() {
+  if (!state.comboParts.length) return '<p class="hint">Todavía no agregas productos a este combo.</p>';
+  return state.comboParts.map((part, index) => {
+    const product = state.products.find((item) => item.id === part.productId);
+    const label = part.quantity === 1 ? 'unidad' : 'unidades';
+    return `<div class="balance"><div><strong>${esc(product?.name || 'Producto')}</strong><p class="hint">${part.quantity.toLocaleString('es-ES')} ${label} por combo</p></div><button class="btn ghost small" type="button" data-action="remove-combo-part" data-index="${index}">Quitar</button></div>`;
+  }).join('');
+}
+
+function comboCostCents() {
+  return state.comboParts.reduce((sum, part) => {
+    const product = state.products.find((item) => item.id === part.productId);
+    return sum + (product?.costCents || 0) * part.quantity;
+  }, 0);
+}
+
+function comboCostHint() {
+  if (!state.comboParts.length) return 'La utilidad se calcula con el costo de los productos que lleve el combo.';
+  return `Costo de los productos: ${money(comboCostCents())}. El precio de venta lo pones tú.`;
+}
+
+function comboListHtml(combos) {
+  if (!combos.length) return '<div class="empty"><h3>Todavía no hay combos</h3><p class="lead">Crea uno cuando quieras vender varios productos juntos a un solo precio.</p></div>';
+  return `<div class="event-list">${combos.map((item) => {
+    const recipe = (item.parts || []).map((part) => `${part.quantity} ${esc(part.name)}`).join(' · ') || 'Sin productos';
+    return `<article class="event-row ${item.active ? '' : 'inactive'}">
+      <div>
+        <h3>${esc(item.name)}</h3>
+        <p class="price-line">Venta ${money(item.priceCents)} · Costo ${money(item.costCents)} · Utilidad ${money(item.profitCents)} · ${item.active ? 'A la venta' : 'Inactivo'}</p>
+        <p class="price-line">${recipe}</p>
+        <p class="hint">${item.stock > 0 ? `Alcanzan ${item.stock.toLocaleString('es-ES')} combos` : 'No alcanzan las unidades para vender uno'}</p>
+      </div>
+      <div class="row-actions">
+        <button class="btn ghost small" type="button" data-action="edit-combo" data-id="${item.id}">Editar</button>
+        <button class="btn ghost small" type="button" data-action="toggle-product" data-id="${item.id}" data-active="${item.active ? '1' : '0'}">${item.active ? 'Desactivar' : 'Activar'}</button>
+        <button class="btn danger small" type="button" data-action="delete-combo" data-id="${item.id}">Eliminar</button>
+      </div>
+    </article>`;
+  }).join('')}</div>`;
+}
+
+function refreshComboParts() {
+  const box = document.getElementById('combo-parts');
+  const hint = document.getElementById('combo-cost');
+  if (box) box.innerHTML = comboPartRows();
+  if (hint) hint.textContent = comboCostHint();
 }
 
 function balances(purchases) {
@@ -669,15 +753,37 @@ function buyMatches(query) {
     .slice(0, 20);
 }
 
+function reservedUnits(productId) {
+  let units = 0;
+  for (const line of state.cart) {
+    const item = state.products.find((product) => product.id === line.productId);
+    if (!item) continue;
+    if (item.isCombo) {
+      for (const part of item.parts || []) {
+        if (part.productId === productId) units += part.quantity * line.quantity;
+      }
+    } else if (item.id === productId) {
+      units += line.quantity;
+    }
+  }
+  return units;
+}
+
 function buyResultsHtml(query) {
   if (!state.products.some((product) => product.active)) return `<p class="hint">El inventario está vacío. Carga productos antes de vender.</p>`;
   const matches = buyMatches(query);
   if (!matches.length) return `<p class="hint">Ningún producto coincide.</p>`;
-  return matches.map((product) => `
+  return matches.map((product) => {
+    const recipe = product.isCombo ? (product.parts || []).map((part) => `${part.quantity} ${part.name}`).join(' · ') : '';
+    const stock = product.stock < 1
+      ? (product.isCombo ? 'faltan unidades' : 'sin existencias')
+      : (product.isCombo ? `alcanzan ${product.stock}` : `quedan ${product.stock}`);
+    return `
     <button class="buy-hit" type="button" data-action="pick-product" data-id="${product.id}" ${product.stock < 1 ? 'disabled' : ''}>
-      <strong>${esc(product.name)}</strong>
-      <span>${money(product.priceCents)} · ${product.stock < 1 ? 'sin existencias' : `quedan ${product.stock}`}</span>
-    </button>`).join('');
+      <strong>${product.isCombo ? 'Combo · ' : ''}${esc(product.name)}</strong>
+      <span>${money(product.priceCents)} · ${stock}${recipe ? ` · ${esc(recipe)}` : ''}</span>
+    </button>`;
+  }).join('');
 }
 
 function cartLinesHtml() {
@@ -710,7 +816,7 @@ function buyModal() {
       <article class="modal card wide" data-stop>
         <p class="stub-kicker">${esc(state.currentTicket?.code || '')}</p>
         <h2 style="font-size:36px">Nueva compra</h2>
-        <p class="lead page-lead">Busca en el inventario y agrega lo que se va a facturar. Al registrar, se restan las existencias.</p>
+        <p class="lead page-lead">Busca un producto o un combo. Al registrar, se cobra el precio elegido y, si es un combo, se restan las unidades de cada producto.</p>
         <div class="cart-add">
           <label class="field"><span>Buscar producto</span><input id="buy-search" type="search" placeholder="Escribe y aparecen los productos" autocomplete="off"></label>
           <label class="field"><span>Cantidad</span><input id="buy-qty" type="number" min="1" max="500" value="1"></label>
@@ -1055,7 +1161,7 @@ function movementsView() {
         </div>
         <strong>${money(sale.totalCents)}</strong>
       </div>
-      ${sale.items.map((item) => `<div class="balance"><div><strong>${esc(item.productName)}</strong><p class="hint">${item.quantity} vendidas · ${money(item.totalCents || 0)}</p></div></div>`).join('')}
+      ${sale.items.map((item) => `<div class="balance"><div><strong>${esc(item.productName)}</strong><p class="hint">${item.unitPriceCents == null ? `${item.quantity} unidades · ${esc(item.note || 'Incluido en un combo')}` : `${item.quantity} vendidas · ${money(item.totalCents || 0)}`}</p></div></div>`).join('')}
       <div class="row-actions" style="margin-top:10px">
         ${sale.hasReceipt ? `<a class="btn ghost small" href="/api/purchases/${sale.purchaseId}/receipt" target="_blank" rel="noopener">Ver comprobante</a>` : '<span class="hint">Sin comprobante</span>'}
         <label class="btn ghost small file-btn">Adjuntar comprobante<input type="file" accept="image/*,.pdf" data-receipt="${sale.purchaseId}"></label>
@@ -1731,6 +1837,25 @@ async function onSubmit(event) {
       await render();
       return;
     }
+    if (kind === 'combo') {
+      if (!state.comboParts.length) {
+        setFormError(form, 'Agrega al menos un producto al combo.');
+        return;
+      }
+      const body = {
+        name: values.name,
+        price: values.price,
+        active: Boolean(form.querySelector('input[name="active"]')?.checked),
+        items: state.comboParts.map((part) => ({ productId: part.productId, quantity: part.quantity })),
+      };
+      if (state.editingCombo) await api(`/api/combos/${state.editingCombo.id}`, { method: 'PATCH', body });
+      else await api('/api/combos', { method: 'POST', body });
+      state.editingCombo = null;
+      state.comboParts = [];
+      toast('Combo guardado.');
+      await render();
+      return;
+    }
     if (kind === 'password') {
       await api('/api/password', { method: 'POST', body: values });
       form.reset();
@@ -1878,19 +2003,29 @@ async function onClick(event) {
     const product = state.products.find((item) => item.id === Number(control.dataset.id));
     const quantity = Number(document.querySelector('#buy-qty')?.value);
     if (!product || product.stock < 1) {
-      toast('Ese producto no tiene existencias.', 'bad');
+      toast(product?.isCombo ? 'No alcanzan las unidades de ese combo.' : 'Ese producto no tiene existencias.', 'bad');
       return;
     }
     if (!Number.isInteger(quantity) || quantity < 1) {
       toast('Indica una cantidad.', 'bad');
       return;
     }
-    const current = state.cart.find((line) => line.productId === product.id)?.quantity || 0;
-    if (current + quantity > product.stock) {
+    if (product.isCombo) {
+      for (const part of product.parts || []) {
+        const source = state.products.find((item) => item.id === part.productId);
+        const used = reservedUnits(part.productId);
+        const left = source?.stock || 0;
+        if (used + part.quantity * quantity > left) {
+          toast(`No alcanzan ${part.name}. Quedan ${Math.max(0, left - used)}.`, 'bad');
+          return;
+        }
+      }
+    } else if (reservedUnits(product.id) + quantity > product.stock) {
       toast(`Solo quedan ${product.stock} de ${product.name}.`, 'bad');
       return;
     }
-    if (current) state.cart.find((line) => line.productId === product.id).quantity += quantity;
+    const current = state.cart.find((line) => line.productId === product.id);
+    if (current) current.quantity += quantity;
     else state.cart.push({ productId: product.id, name: product.name, priceCents: product.priceCents, quantity });
     refreshBuyCart();
     return;
@@ -1986,10 +2121,66 @@ async function onClick(event) {
     updatePackHint();
     return;
   }
+  if (action === 'add-combo-part') {
+    const productId = Number(document.querySelector('#combo-product')?.value);
+    const quantity = Number(document.querySelector('#combo-qty')?.value);
+    const product = state.products.find((item) => item.id === productId && !item.isCombo);
+    if (!product) {
+      toast('Primero carga el producto en el inventario.', 'bad');
+      return;
+    }
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) {
+      toast('Indica cuántas unidades lleva el combo.', 'bad');
+      return;
+    }
+    const current = state.comboParts.find((part) => part.productId === product.id);
+    if (current) current.quantity = Math.min(500, current.quantity + quantity);
+    else state.comboParts.push({ productId: product.id, quantity });
+    refreshComboParts();
+    return;
+  }
+  if (action === 'remove-combo-part') {
+    state.comboParts.splice(Number(control.dataset.index), 1);
+    refreshComboParts();
+    return;
+  }
+  if (action === 'edit-combo') {
+    const item = state.products.find((product) => product.id === Number(control.dataset.id) && product.isCombo);
+    if (!item) return;
+    state.editingProduct = null;
+    state.editingCombo = item;
+    state.comboParts = (item.parts || []).map((part) => ({ productId: part.productId, quantity: part.quantity }));
+    mount(shell(inventoryView()));
+    return;
+  }
+  if (action === 'cancel-combo') {
+    state.editingCombo = null;
+    state.comboParts = [];
+    mount(shell(inventoryView()));
+    updateProductProfit();
+    updatePackHint();
+    return;
+  }
+  if (action === 'delete-combo') {
+    if (!confirm('¿Eliminar este combo? Solo se puede si todavía no se ha vendido.')) return;
+    try {
+      await api(`/api/combos/${control.dataset.id}`, { method: 'DELETE' });
+      if (state.editingCombo?.id === Number(control.dataset.id)) {
+        state.editingCombo = null;
+        state.comboParts = [];
+      }
+      toast('Combo eliminado.');
+      await render();
+    } catch (error) {
+      toast(error.message, 'bad');
+    }
+    return;
+  }
   if (action === 'toggle-product') {
     const active = control.dataset.active !== '1';
+    const product = state.products.find((item) => item.id === Number(control.dataset.id));
     await api(`/api/products/${control.dataset.id}`, { method: 'PATCH', body: { active } });
-    toast(active ? 'Producto activado.' : 'Producto desactivado.');
+    toast(active ? (product?.isCombo ? 'Combo activado.' : 'Producto activado.') : (product?.isCombo ? 'Combo desactivado.' : 'Producto desactivado.'));
     await render();
     return;
   }

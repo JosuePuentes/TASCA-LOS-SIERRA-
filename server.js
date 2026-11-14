@@ -116,6 +116,15 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_movements_created ON movements(created_at);
 
+  CREATE TABLE IF NOT EXISTS combo_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    combo_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL,
+    FOREIGN KEY (combo_id) REFERENCES products(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(id)
+  );
+
   CREATE TABLE IF NOT EXISTS screens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
@@ -150,6 +159,9 @@ if (!columnNames('products').includes('cost_cents')) {
 }
 if (!columnNames('products').includes('units_per_box')) {
   db.exec('ALTER TABLE products ADD COLUMN units_per_box INTEGER NOT NULL DEFAULT 1');
+}
+if (!columnNames('products').includes('is_combo')) {
+  db.exec('ALTER TABLE products ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0');
 }
 if (!columnNames('tickets').includes('alias')) db.exec('ALTER TABLE tickets ADD COLUMN alias TEXT');
 if (!columnNames('tickets').includes('payment_method')) db.exec('ALTER TABLE tickets ADD COLUMN payment_method TEXT');
@@ -249,8 +261,71 @@ function presentProduct(row) {
     stockSaleCents: priceCents * stock,
     stockProfitCents: (priceCents - costCents) * stock,
     active: Boolean(row.active),
+    isCombo: Boolean(row.is_combo),
     createdAt: row.created_at,
   };
+}
+
+function comboParts(comboId) {
+  return db.prepare(`
+    SELECT ci.product_id, ci.quantity, p.name, p.cost_cents, p.stock, p.active
+    FROM combo_items ci
+    JOIN products p ON p.id = ci.product_id
+    WHERE ci.combo_id = ?
+    ORDER BY p.name COLLATE NOCASE
+  `).all(comboId).map((row) => ({
+    productId: num(row.product_id),
+    name: row.name,
+    quantity: num(row.quantity),
+    costCents: num(row.cost_cents),
+    stock: num(row.stock),
+    active: Boolean(row.active),
+  }));
+}
+
+function presentCatalog(row) {
+  const base = presentProduct(row);
+  if (!row.is_combo) return base;
+  const parts = comboParts(row.id);
+  const costCents = parts.reduce((sum, part) => sum + part.costCents * part.quantity, 0);
+  const available = parts.length
+    ? parts.reduce((left, part) => Math.min(left, part.active && part.quantity > 0 ? Math.floor(part.stock / part.quantity) : 0), Infinity)
+    : 0;
+  return {
+    ...base,
+    isCombo: true,
+    costCents,
+    profitCents: base.priceCents - costCents,
+    stock: Number.isFinite(available) ? available : 0,
+    parts,
+    stockCostCents: 0,
+    stockSaleCents: 0,
+    stockProfitCents: 0,
+  };
+}
+
+function readComboParts(list) {
+  if (!Array.isArray(list) || !list.length || list.length > 20) {
+    return { error: 'Agrega al menos un producto al combo.' };
+  }
+  const merged = new Map();
+  for (const raw of list) {
+    const productId = Number(raw?.productId);
+    const quantity = wholeNumber(raw?.quantity, 1, 500);
+    if (!productId || quantity == null) return { error: 'Revisa las unidades de cada producto del combo.' };
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+    if (!product || product.is_combo) return { error: 'El combo solo puede usar productos sueltos.' };
+    merged.set(productId, (merged.get(productId) || 0) + quantity);
+  }
+  const parts = [...merged.entries()].map(([productId, quantity]) => ({ productId, quantity }));
+  if (parts.length > 20) return { error: 'Un combo admite hasta 20 productos.' };
+  return { parts };
+}
+
+function saveComboParts(comboId, parts) {
+  db.prepare('DELETE FROM combo_items WHERE combo_id = ?').run(comboId);
+  const insert = db.prepare('INSERT INTO combo_items (combo_id, product_id, quantity) VALUES (?, ?, ?)');
+  for (const part of parts) insert.run(comboId, part.productId, part.quantity);
 }
 
 function presentItem(row) {
@@ -520,6 +595,7 @@ const API_RULES = [
   { test: /^\/api\/tickets\/\d+\/receipt$/, modules: ['visor', 'entradas'] },
   { test: /^\/api\/tickets\/code\//, modules: ['visor'] },
   { test: /^\/api\/products(\/|$)/, modules: ['inventario'] },
+  { test: /^\/api\/combos(\/|$)/, modules: ['inventario'] },
   { test: /^\/api\/purchases\/\d+\/(payment|deliver)$/, modules: ['visor'] },
   { test: /^\/api\/purchases\/\d+\/receipt$/, modules: ['movimientos'] },
   { test: /^\/api\/sales$/, modules: ['ventas'] },
@@ -951,8 +1027,8 @@ app.post('/api/tickets/code/:code/use', requireAuth, (req, res) => {
 });
 
 app.get('/api/products', requireAuth, (req, res) => {
-  const products = db.prepare('SELECT * FROM products ORDER BY active DESC, name COLLATE NOCASE').all();
-  res.json({ products: products.map(presentProduct) });
+  const products = db.prepare('SELECT * FROM products ORDER BY is_combo, active DESC, name COLLATE NOCASE').all();
+  res.json({ products: products.map(presentCatalog) });
 });
 
 app.post('/api/products', requireAuth, (req, res) => {
@@ -999,6 +1075,16 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
   const id = Number(req.params.id);
   const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   if (!current) return res.status(404).json({ error: 'No se encontró el producto.' });
+  if (current.is_combo && req.body.addStock != null) {
+    return res.status(400).json({ error: 'Un combo no guarda existencias. Suma las unidades en cada producto.' });
+  }
+  if (current.is_combo && req.body.name == null && req.body.price == null && req.body.active != null) {
+    db.prepare('UPDATE products SET active = ? WHERE id = ?').run(req.body.active ? 1 : 0, id);
+    return res.json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
+  }
+  if (current.is_combo) {
+    return res.status(400).json({ error: 'Edita el combo desde la sección de combos.' });
+  }
   if (req.body.addStock != null) {
     const perBox = Math.max(1, num(current.units_per_box) || 1);
     const packed = unitsFromPack(req.body.addStock, perBox, req.body.pack, { min: 1 });
@@ -1057,6 +1143,65 @@ app.delete('/api/products/:id', requireAuth, (req, res) => {
   if (!current) return res.status(404).json({ error: 'No se encontró el producto.' });
   const used = num(db.prepare('SELECT COUNT(*) AS n FROM purchase_items WHERE product_id = ?').get(id).n);
   if (used) return res.status(409).json({ error: 'Este producto ya tiene compras. Desactívalo si ya no se vende.' });
+  const inCombo = num(db.prepare('SELECT COUNT(*) AS n FROM combo_items WHERE product_id = ?').get(id).n);
+  if (inCombo) return res.status(409).json({ error: 'Este producto está dentro de un combo. Quítalo del combo antes de eliminarlo.' });
+  if (current.is_combo) db.prepare('DELETE FROM combo_items WHERE combo_id = ?').run(id);
+  db.prepare('DELETE FROM products WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/combos', requireAuth, (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const priceCents = toCents(req.body.price);
+  const active = req.body.active == null ? true : Boolean(req.body.active);
+  const recipe = readComboParts(req.body.items);
+  if (name.length < 2 || name.length > 80) {
+    return res.status(400).json({ error: 'El nombre del combo debe tener entre 2 y 80 caracteres.' });
+  }
+  if (priceCents == null || priceCents > 10000000) {
+    return res.status(400).json({ error: 'Escribe el precio de venta del combo, con hasta dos decimales.' });
+  }
+  if (recipe.error) return res.status(400).json({ error: recipe.error });
+  const info = db.prepare(`
+    INSERT INTO products (name, cost_cents, price_cents, stock, units_per_box, active, is_combo, created_at)
+    VALUES (?, 0, ?, 0, 1, ?, 1, ?)
+  `).run(name, priceCents, active ? 1 : 0, new Date().toISOString());
+  const id = num(info.lastInsertRowid);
+  saveComboParts(id, recipe.parts);
+  res.status(201).json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
+});
+
+app.patch('/api/combos/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const current = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 1').get(id);
+  if (!current) return res.status(404).json({ error: 'No se encontró el combo.' });
+  const name = req.body.name == null ? current.name : String(req.body.name).trim();
+  const priceCents = req.body.price == null ? num(current.price_cents) : toCents(req.body.price);
+  const active = req.body.active == null ? Boolean(current.active) : Boolean(req.body.active);
+  if (name.length < 2 || name.length > 80) {
+    return res.status(400).json({ error: 'El nombre del combo debe tener entre 2 y 80 caracteres.' });
+  }
+  if (priceCents == null || priceCents > 10000000) {
+    return res.status(400).json({ error: 'Escribe el precio de venta del combo, con hasta dos decimales.' });
+  }
+  let parts = null;
+  if (req.body.items != null) {
+    const recipe = readComboParts(req.body.items);
+    if (recipe.error) return res.status(400).json({ error: recipe.error });
+    parts = recipe.parts;
+  }
+  db.prepare('UPDATE products SET name = ?, price_cents = ?, active = ? WHERE id = ?').run(name, priceCents, active ? 1 : 0, id);
+  if (parts) saveComboParts(id, parts);
+  res.json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
+});
+
+app.delete('/api/combos/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const current = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 1').get(id);
+  if (!current) return res.status(404).json({ error: 'No se encontró el combo.' });
+  const used = num(db.prepare('SELECT COUNT(*) AS n FROM purchase_items WHERE product_id = ?').get(id).n);
+  if (used) return res.status(409).json({ error: 'Este combo ya tiene ventas. Desactívalo si ya no se vende.' });
+  db.prepare('DELETE FROM combo_items WHERE combo_id = ?').run(id);
   db.prepare('DELETE FROM products WHERE id = ?').run(id);
   res.json({ ok: true });
 });
@@ -1085,32 +1230,76 @@ app.post('/api/tickets/code/:code/purchases', requireAuth, (req, res) => {
     INSERT INTO purchase_items (purchase_id, product_id, product_name, unit_price_cents, quantity, delivered)
     VALUES (?, ?, ?, ?, ?, 0)
   `);
-  const takeStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND active = 1 AND stock >= ?');
+  const takeStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND active = 1 AND is_combo = 0 AND stock >= ?');
   let purchaseId = 0;
   db.exec('BEGIN');
   try {
-    const info = insertPurchase.run(ticket.id, paymentMethod, new Date().toISOString());
-    purchaseId = num(info.lastInsertRowid);
+    const lines = [];
+    const consumption = new Map();
     for (const [productId, quantity] of merged) {
       const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
       if (!product || !product.active) throw httpError(400, 'Hay un producto que ya no está a la venta.');
+      lines.push({ product, quantity });
+      if (product.is_combo) {
+        const parts = db.prepare('SELECT product_id, quantity FROM combo_items WHERE combo_id = ?').all(product.id);
+        if (!parts.length) throw httpError(400, `${product.name} no tiene productos.`);
+        for (const part of parts) {
+          const units = num(part.quantity) * quantity;
+          consumption.set(num(part.product_id), (consumption.get(num(part.product_id)) || 0) + units);
+        }
+      } else {
+        consumption.set(productId, (consumption.get(productId) || 0) + quantity);
+      }
+    }
+    for (const [productId, quantity] of consumption) {
+      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+      if (!product || product.is_combo) throw httpError(400, 'Hay un producto del combo que ya no existe.');
+      if (!product.active) throw httpError(400, `${product.name} ya no está a la venta.`);
       if (num(product.stock) < quantity) {
         throw httpError(400, `No hay suficientes existencias de ${product.name}. Quedan ${num(product.stock)}.`);
       }
+    }
+    const info = insertPurchase.run(ticket.id, paymentMethod, new Date().toISOString());
+    purchaseId = num(info.lastInsertRowid);
+    for (const [productId, quantity] of consumption) {
       const taken = takeStock.run(quantity, productId, quantity);
-      if (!num(taken.changes)) throw httpError(400, `No se pudo descontar ${product.name} del inventario.`);
-      insertItem.run(purchaseId, product.id, product.name, num(product.price_cents), quantity);
+      if (!num(taken.changes)) {
+        const product = db.prepare('SELECT name FROM products WHERE id = ?').get(productId);
+        throw httpError(400, `No se pudo descontar ${product?.name || 'un producto'} del inventario.`);
+      }
+    }
+    for (const line of lines) {
+      insertItem.run(purchaseId, line.product.id, line.product.name, num(line.product.price_cents), line.quantity);
       logMovement({
         kind: 'venta',
-        productId: num(product.id),
-        productName: product.name,
-        quantity,
-        unitPriceCents: num(product.price_cents),
+        productId: num(line.product.id),
+        productName: line.product.name,
+        quantity: line.quantity,
+        unitPriceCents: num(line.product.price_cents),
         purchaseId,
         ticketId: ticket.id,
         userId: req.account?.id,
         note: ticket.code,
       });
+      if (!line.product.is_combo) continue;
+      const parts = db.prepare(`
+        SELECT ci.quantity, p.id, p.name
+        FROM combo_items ci
+        JOIN products p ON p.id = ci.product_id
+        WHERE ci.combo_id = ?
+      `).all(line.product.id);
+      for (const part of parts) {
+        logMovement({
+          kind: 'venta',
+          productId: num(part.id),
+          productName: part.name,
+          quantity: num(part.quantity) * line.quantity,
+          purchaseId,
+          ticketId: ticket.id,
+          userId: req.account?.id,
+          note: `Combo ${line.product.name}`,
+        });
+      }
     }
     db.exec('COMMIT');
   } catch (error) {

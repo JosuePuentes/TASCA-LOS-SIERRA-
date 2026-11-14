@@ -148,6 +148,9 @@ if (!columnNames('purchases').includes('receipt_file')) {
 if (!columnNames('products').includes('cost_cents')) {
   db.exec('ALTER TABLE products ADD COLUMN cost_cents INTEGER NOT NULL DEFAULT 0');
 }
+if (!columnNames('products').includes('units_per_box')) {
+  db.exec('ALTER TABLE products ADD COLUMN units_per_box INTEGER NOT NULL DEFAULT 1');
+}
 if (!columnNames('tickets').includes('alias')) db.exec('ALTER TABLE tickets ADD COLUMN alias TEXT');
 if (!columnNames('tickets').includes('payment_method')) db.exec('ALTER TABLE tickets ADD COLUMN payment_method TEXT');
 if (!columnNames('tickets').includes('receipt_file')) db.exec('ALTER TABLE tickets ADD COLUMN receipt_file TEXT');
@@ -208,6 +211,28 @@ function wholeNumber(value, min, max) {
   return number;
 }
 
+function readUnitsPerBox(value, fallback = 1) {
+  if (value == null || value === '') return fallback;
+  return wholeNumber(value, 1, 10000);
+}
+
+function unitsFromPack(count, unitsPerBox, pack, { min = 0 } = {}) {
+  const mode = pack === 'box' ? 'box' : 'unit';
+  const amount = wholeNumber(count, min, 100000);
+  if (amount == null) {
+    return { error: min > 0
+      ? 'Indica una cantidad entera entre 1 y 100000.'
+      : 'La cantidad tiene que ser un número entero entre 0 y 100000.' };
+  }
+  if (mode === 'unit') return { units: amount, note: '' };
+  if (unitsPerBox < 2) {
+    return { error: 'Pon cuántas unidades trae la caja. Tiene que ser 2 o más.' };
+  }
+  const units = amount * unitsPerBox;
+  if (units > 1000000) return { error: 'Esa cantidad de cajas pasa de 1000000 unidades.' };
+  return { units, note: `${amount} cajas × ${unitsPerBox} = ${units} unidades` };
+}
+
 function presentProduct(row) {
   const priceCents = num(row.price_cents);
   const costCents = num(row.cost_cents);
@@ -219,6 +244,7 @@ function presentProduct(row) {
     priceCents,
     profitCents: priceCents - costCents,
     stock,
+    unitsPerBox: Math.max(1, num(row.units_per_box) || 1),
     stockCostCents: costCents * stock,
     stockSaleCents: priceCents * stock,
     stockProfitCents: (priceCents - costCents) * stock,
@@ -933,7 +959,8 @@ app.post('/api/products', requireAuth, (req, res) => {
   const name = String(req.body.name || '').trim();
   const costCents = toCents(req.body.cost);
   const priceCents = toCents(req.body.price);
-  const stock = wholeNumber(req.body.stock, 0, 100000);
+  const unitsPerBox = readUnitsPerBox(req.body.unitsPerBox, 1);
+  const packed = unitsFromPack(req.body.stock, unitsPerBox, req.body.pack, { min: 0 });
   if (name.length < 2 || name.length > 80) {
     return res.status(400).json({ error: 'El nombre debe tener entre 2 y 80 caracteres.' });
   }
@@ -943,24 +970,26 @@ app.post('/api/products', requireAuth, (req, res) => {
   if (priceCents == null || priceCents > 10000000) {
     return res.status(400).json({ error: 'Escribe el precio de venta, con hasta dos decimales.' });
   }
-  if (stock == null) return res.status(400).json({ error: 'Las existencias tienen que ser un número entero entre 0 y 100000.' });
-  const info = db.prepare('INSERT INTO products (name, cost_cents, price_cents, stock, active, created_at) VALUES (?, ?, ?, ?, 1, ?)').run(
+  if (unitsPerBox == null) return res.status(400).json({ error: 'Las unidades por caja tienen que ser un número entero entre 1 y 10000.' });
+  if (packed.error) return res.status(400).json({ error: packed.error });
+  const info = db.prepare('INSERT INTO products (name, cost_cents, price_cents, stock, units_per_box, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)').run(
     name,
     costCents,
     priceCents,
-    stock,
+    packed.units,
+    unitsPerBox,
     new Date().toISOString(),
   );
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(num(info.lastInsertRowid));
-  if (stock > 0) {
+  if (packed.units > 0) {
     logMovement({
       kind: 'entrada',
       productId: num(product.id),
       productName: product.name,
-      quantity: stock,
+      quantity: packed.units,
       unitPriceCents: num(product.price_cents),
       userId: req.account?.id,
-      note: 'Alta de producto',
+      note: packed.note ? `Alta: ${packed.note}` : 'Alta de producto',
     });
   }
   res.status(201).json({ product: presentProduct(product) });
@@ -971,24 +1000,29 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
   const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   if (!current) return res.status(404).json({ error: 'No se encontró el producto.' });
   if (req.body.addStock != null) {
-    const add = wholeNumber(req.body.addStock, 1, 100000);
-    if (add == null) return res.status(400).json({ error: 'Indica cuántas unidades vas a sumar.' });
-    db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(add, id);
+    const perBox = Math.max(1, num(current.units_per_box) || 1);
+    const packed = unitsFromPack(req.body.addStock, perBox, req.body.pack, { min: 1 });
+    if (packed.error) return res.status(400).json({ error: packed.error });
+    if (num(current.stock) + packed.units > 1000000) {
+      return res.status(400).json({ error: 'Esa suma pasa de 1000000 unidades en existencia.' });
+    }
+    db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(packed.units, id);
     logMovement({
       kind: 'entrada',
       productId: id,
       productName: current.name,
-      quantity: add,
+      quantity: packed.units,
       unitPriceCents: num(current.price_cents),
       userId: req.account?.id,
-      note: 'Suma de existencias',
+      note: packed.note || 'Suma de existencias',
     });
     return res.json({ product: presentProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
   }
   const name = req.body.name == null ? current.name : String(req.body.name).trim();
   const costCents = req.body.cost == null ? num(current.cost_cents) : toCents(req.body.cost);
   const priceCents = req.body.price == null ? num(current.price_cents) : toCents(req.body.price);
-  const stock = req.body.stock == null ? num(current.stock) : wholeNumber(req.body.stock, 0, 100000);
+  const stock = req.body.stock == null ? num(current.stock) : wholeNumber(req.body.stock, 0, 1000000);
+  const unitsPerBox = req.body.unitsPerBox == null ? Math.max(1, num(current.units_per_box) || 1) : readUnitsPerBox(req.body.unitsPerBox, null);
   const active = req.body.active == null ? Boolean(current.active) : Boolean(req.body.active);
   if (name.length < 2 || name.length > 80) {
     return res.status(400).json({ error: 'El nombre debe tener entre 2 y 80 caracteres.' });
@@ -999,9 +1033,10 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
   if (priceCents == null || priceCents > 10000000) {
     return res.status(400).json({ error: 'Escribe el precio de venta, con hasta dos decimales.' });
   }
-  if (stock == null) return res.status(400).json({ error: 'Las existencias tienen que ser un número entero entre 0 y 100000.' });
+  if (unitsPerBox == null) return res.status(400).json({ error: 'Las unidades por caja tienen que ser un número entero entre 1 y 10000.' });
+  if (stock == null) return res.status(400).json({ error: 'Las existencias tienen que ser un número entero entre 0 y 1000000.' });
   const delta = stock - num(current.stock);
-  db.prepare('UPDATE products SET name = ?, cost_cents = ?, price_cents = ?, stock = ?, active = ? WHERE id = ?').run(name, costCents, priceCents, stock, active ? 1 : 0, id);
+  db.prepare('UPDATE products SET name = ?, cost_cents = ?, price_cents = ?, stock = ?, units_per_box = ?, active = ? WHERE id = ?').run(name, costCents, priceCents, stock, unitsPerBox, active ? 1 : 0, id);
   if (delta !== 0) {
     logMovement({
       kind: delta > 0 ? 'entrada' : 'ajuste',

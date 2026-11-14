@@ -517,6 +517,30 @@ function updateProductProfit() {
   box.classList.toggle('loss', profit < 0);
 }
 
+function updatePackHint() {
+  const form = document.querySelector('form[data-form="product"]');
+  const hint = document.getElementById('pack-hint');
+  const label = document.getElementById('stock-label');
+  if (!form || !hint) return;
+  const pack = form.pack?.value || 'unit';
+  const perBox = Number(form.unitsPerBox?.value);
+  const count = Number(form.stock?.value);
+  if (label) label.textContent = pack === 'box' ? 'Cajas' : 'Existencias en unidades';
+  if (pack !== 'box') {
+    hint.textContent = 'Esto queda en unidades. En el visor se vende de una en una.';
+    return;
+  }
+  if (!Number.isInteger(perBox) || perBox < 2) {
+    hint.textContent = 'Escribe cuántas unidades trae cada caja.';
+    return;
+  }
+  if (!Number.isInteger(count) || count < 1) {
+    hint.textContent = `Cada caja suma ${perBox} unidades.`;
+    return;
+  }
+  hint.textContent = `${count.toLocaleString('es-ES')} cajas × ${perBox.toLocaleString('es-ES')} = ${(count * perBox).toLocaleString('es-ES')} unidades.`;
+}
+
 function inventoryView() {
   const editing = state.editingProduct;
   const products = state.products;
@@ -528,11 +552,15 @@ function inventoryView() {
         <article class="event-row ${product.active ? '' : 'inactive'}">
           <div>
             <h3>${esc(product.name)}</h3>
-            <p class="price-line">Costo ${money(product.costCents)} · Venta ${money(product.priceCents)} · ${product.stock} en existencia · ${product.active ? 'A la venta' : 'Inactivo'}</p>
-            <p class="price-line">Utilidad ${money(product.profitCents)} por unidad · ${money(product.stockProfitCents)} en estas existencias</p>
+            <p class="price-line">Costo ${money(product.costCents)} · Venta ${money(product.priceCents)} · ${product.stock.toLocaleString('es-ES')} en existencia · ${product.active ? 'A la venta' : 'Inactivo'}</p>
+            <p class="price-line">${product.unitsPerBox > 1 ? `Caja de ${product.unitsPerBox.toLocaleString('es-ES')} unidades · ` : ''}Utilidad ${money(product.profitCents)} por unidad · ${money(product.stockProfitCents)} en estas existencias</p>
           </div>
           <div class="row-actions">
-            <input class="stock-add" type="number" min="1" max="100000" value="1" data-add-stock="${product.id}" aria-label="Unidades a sumar de ${esc(product.name)}">
+            <input class="stock-add" type="number" min="1" max="100000" value="1" data-add-stock="${product.id}" aria-label="Cantidad a sumar de ${esc(product.name)}">
+            <select class="pack-select" data-add-pack="${product.id}" aria-label="Sumar por unidad o por caja">
+              <option value="unit">Unidad</option>
+              <option value="box">Caja${product.unitsPerBox > 1 ? ` de ${product.unitsPerBox}` : ''}</option>
+            </select>
             <button class="btn ghost small" type="button" data-action="add-stock" data-id="${product.id}">Sumar</button>
             <button class="btn ghost small" type="button" data-action="edit-product" data-id="${product.id}">Editar</button>
             <button class="btn ghost small" type="button" data-action="toggle-product" data-id="${product.id}" data-active="${product.active ? '1' : '0'}">${product.active ? 'Desactivar' : 'Activar'}</button>
@@ -547,12 +575,15 @@ function inventoryView() {
     <div class="stack">
       <form class="card product-form" data-form="product">
         <h2>${editing ? 'Editar producto' : 'Cargar producto'}</h2>
-        <p class="lead page-lead">El costo es lo que te cuesta. El precio de venta es lo que cobras. La utilidad sale sola.</p>
+        <p class="lead page-lead">El costo y el precio son por unidad. Si llega por caja, escribe cuántas unidades trae: 10 cajas de 36 quedan en 360 unidades. La venta sigue siendo por unidad.</p>
         <label class="field"><span>Producto</span><input name="name" maxlength="80" required value="${esc(editing?.name || '')}" placeholder="Nombre del producto"></label>
         <label class="field"><span>Costo</span><input name="cost" inputmode="decimal" required value="${esc(costField)}" placeholder="0,00"></label>
         <label class="field"><span>Precio de venta</span><input name="price" inputmode="decimal" required value="${esc(priceValue)}" placeholder="0,00"></label>
         <p class="hint" id="product-profit">Escribe el costo y el precio de venta para ver la utilidad.</p>
-        <label class="field"><span>Existencias</span><input name="stock" type="number" min="0" max="100000" required value="${esc(stockValue)}" placeholder="0"></label>
+        <label class="field"><span>Unidades por caja</span><input name="unitsPerBox" type="number" min="1" max="10000" value="${editing ? esc(String(editing.unitsPerBox || 1)) : ''}" placeholder="36"></label>
+        ${editing ? '' : `<label class="field"><span>Cómo llega</span><select name="pack"><option value="unit">Por unidad</option><option value="box">Por caja</option></select></label>`}
+        <label class="field"><span id="stock-label">${editing ? 'Existencias en unidades' : 'Existencias'}</span><input name="stock" type="number" min="0" max="1000000" required value="${esc(stockValue)}" placeholder="0"></label>
+        <p class="hint" id="pack-hint">${editing ? 'Al editar, las existencias se guardan en unidades. Para meter cajas usa Sumar.' : 'Esto queda en unidades. En el visor se vende de una en una.'}</p>
         <label class="check"><input name="active" type="checkbox" ${editing ? (editing.active ? 'checked' : '') : 'checked'}><span>Disponible para vender en el visor</span></label>
         <p class="form-error" hidden></p>
         <div class="row-actions">
@@ -1479,6 +1510,7 @@ async function render() {
       if (token !== renderToken) return;
       mount(shell(inventoryView()));
       updateProductProfit();
+      updatePackHint();
       return;
     }
     if (path === '/panel/ventas') {
@@ -1678,8 +1710,14 @@ async function onSubmit(event) {
         cost: values.cost,
         price: values.price,
         stock: Number(values.stock),
+        unitsPerBox: values.unitsPerBox === '' ? 1 : Number(values.unitsPerBox),
         active: Boolean(form.querySelector('input[name="active"]')?.checked),
       };
+      if (!state.editingProduct) body.pack = form.pack?.value || 'unit';
+      if (body.pack === 'box' && (!Number.isInteger(body.unitsPerBox) || body.unitsPerBox < 2)) {
+        setFormError(form, 'Escribe cuántas unidades trae cada caja.');
+        return;
+      }
       if (state.editingProduct) await api(`/api/products/${state.editingProduct.id}`, { method: 'PATCH', body });
       else await api('/api/products', { method: 'POST', body });
       state.editingProduct = null;
@@ -1936,12 +1974,14 @@ async function onClick(event) {
     state.editingProduct = state.products.find((item) => item.id === Number(control.dataset.id)) || null;
     mount(shell(inventoryView()));
     updateProductProfit();
+    updatePackHint();
     return;
   }
   if (action === 'cancel-product') {
     state.editingProduct = null;
     mount(shell(inventoryView()));
     updateProductProfit();
+    updatePackHint();
     return;
   }
   if (action === 'toggle-product') {
@@ -1953,13 +1993,22 @@ async function onClick(event) {
   }
   if (action === 'add-stock') {
     const input = document.querySelector(`[data-add-stock="${control.dataset.id}"]`);
+    const pack = document.querySelector(`[data-add-pack="${control.dataset.id}"]`)?.value || 'unit';
     const addStock = Number(input?.value);
+    const product = state.products.find((item) => item.id === Number(control.dataset.id));
     if (!Number.isInteger(addStock) || addStock < 1) {
-      toast('Indica cuántas unidades vas a sumar.', 'bad');
+      toast('Indica una cantidad entera.', 'bad');
       return;
     }
-    await api(`/api/products/${control.dataset.id}`, { method: 'PATCH', body: { addStock } });
-    toast('Existencias actualizadas.');
+    if (pack === 'box' && (!product || product.unitsPerBox < 2)) {
+      toast('Edita el producto y pon cuántas unidades trae la caja.', 'bad');
+      return;
+    }
+    await api(`/api/products/${control.dataset.id}`, { method: 'PATCH', body: { addStock, pack } });
+    const units = pack === 'box' ? addStock * product.unitsPerBox : addStock;
+    toast(pack === 'box'
+      ? `Se sumaron ${units.toLocaleString('es-ES')} unidades (${addStock.toLocaleString('es-ES')} cajas).`
+      : 'Existencias actualizadas.');
     await render();
     return;
   }
@@ -2072,13 +2121,17 @@ document.addEventListener('submit', (event) => {
 });
 document.addEventListener('input', (event) => {
   if (event.target.closest('#ticket-form')) updateTotal();
-  if (event.target.closest('form[data-form="product"]')) updateProductProfit();
+  if (event.target.closest('form[data-form="product"]')) {
+    updateProductProfit();
+    updatePackHint();
+  }
   if (event.target.id === 'buy-search') {
     const box = document.getElementById('buy-results');
     if (box) box.innerHTML = buyResultsHtml(event.target.value);
   }
 });
 document.addEventListener('change', (event) => {
+  if (event.target.closest('form[data-form="product"]')) updatePackHint();
   if (event.target.closest('#ticket-form')) updateTotal();
   const payment = event.target.closest('select[data-pay]');
   if (payment) {

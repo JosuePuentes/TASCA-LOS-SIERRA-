@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openDatabase } from './db.js';
 import express from 'express';
-import session from 'express-session';
+import cookieSession from 'cookie-session';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import QRCode from 'qrcode';
@@ -666,20 +666,17 @@ function presentScreen(row) {
   };
 }
 
+const hosted = onVercel || Boolean(process.env.RENDER);
 const app = express();
-if (onVercel) app.set('trust proxy', 1);
+if (hosted) app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
-app.use(session({
-  name: 'tasca.sid',
-  secret: process.env.SESSION_SECRET || 'tasca-los-sierra-puerta-local',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: onVercel,
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-  },
+app.use(cookieSession({
+  name: 'tasca.session',
+  keys: [process.env.SESSION_SECRET || 'tasca-los-sierra-puerta-local'],
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+  httpOnly: true,
+  sameSite: 'lax',
+  secure: hosted,
 }));
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
@@ -704,10 +701,8 @@ app.post('/api/login', (req, res) => {
 });
 
 app.post('/api/logout', (req, res) => {
-  req.session.destroy(() => {
-    res.clearCookie('tasca.sid');
-    res.json({ ok: true });
-  });
+  req.session = null;
+  res.json({ ok: true });
 });
 
 app.get('/api/me', (req, res) => {

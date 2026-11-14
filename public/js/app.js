@@ -1132,7 +1132,7 @@ function screensView() {
             <label class="choice"><input type="radio" name="kind" value="video"><span><strong>Video</strong><small>MP4, WEBM o MOV, hasta 100 MB.</small></span></label>
             <label class="choice"><input type="radio" name="kind" value="youtube"><span><strong>YouTube</strong><small>Pega el enlace del video.</small></span></label>
           </div>
-          <label class="field" id="screen-file-field"><span>Archivo</span><input name="file" type="file" accept="image/*,video/mp4,video/webm,video/quicktime"></label>
+          <label class="field" id="screen-file-field"><span>Archivo</span><input name="file" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.m4v"></label>
           <label class="field" id="screen-youtube-field" hidden><span>Enlace de YouTube</span><input name="youtube" placeholder="https://www.youtube.com/watch?v="></label>
           <label class="field"><span>Dónde se ve</span>
             <select name="target">
@@ -1187,7 +1187,13 @@ function paintScreen(screen) {
   if (content.kind === 'image') {
     stage.innerHTML = `<img alt="${esc(content.title || 'Imagen')}" src="${esc(content.source)}">`;
   } else if (content.kind === 'video') {
-    stage.innerHTML = `<video src="${esc(content.source)}" autoplay loop playsinline controls></video>`;
+    stage.innerHTML = `<video src="${esc(content.source)}" autoplay loop playsinline controls preload="auto"></video>`;
+    const video = stage.querySelector('video');
+    video.play().catch(() => {});
+    video.addEventListener('error', () => {
+      stage.className = 'screen-stage wait';
+      stage.innerHTML = `<div><p class="eyebrow">Video</p><h1>No se pudo reproducir</h1><p>El televisor no abre este archivo. Usa un MP4.</p></div>`;
+    });
   } else {
     const id = encodeURIComponent(content.source);
     stage.innerHTML = youtubeFrame(id, content.title);

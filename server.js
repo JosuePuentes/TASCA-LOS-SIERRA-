@@ -557,43 +557,61 @@ function youtubeId(value) {
   return match ? match[1] : null;
 }
 
-function extensionFor(mime) {
-  return {
+function fileExtension(file) {
+  const mime = String(file?.mimetype || '').split(';')[0].trim().toLowerCase();
+  const fromMime = {
     'image/jpeg': '.jpg',
     'image/png': '.png',
     'image/webp': '.webp',
     'image/gif': '.gif',
     'application/pdf': '.pdf',
     'video/mp4': '.mp4',
+    'application/mp4': '.mp4',
+    'video/x-m4v': '.mp4',
     'video/webm': '.webm',
     'video/quicktime': '.mov',
-  }[mime] || '';
+  }[mime];
+  if (fromMime) return fromMime;
+  const name = String(file?.originalname || '').toLowerCase();
+  const match = name.match(/\.([a-z0-9]+)$/);
+  const ext = match?.[1] || '';
+  if (ext === 'jpeg' || ext === 'jpg') return '.jpg';
+  if (ext === 'png' || ext === 'webp' || ext === 'gif' || ext === 'pdf') return `.${ext}`;
+  if (ext === 'mp4' || ext === 'm4v') return '.mp4';
+  if (ext === 'webm') return '.webm';
+  if (ext === 'mov') return '.mov';
+  return '';
 }
 
-function uploadSingle(dir, allowed) {
+function isVideoFile(file) {
+  return ['.mp4', '.webm', '.mov'].includes(fileExtension(file));
+}
+
+function uploadSingle(dir, accept, rejectedMessage) {
   const middleware = multer({
     storage: multer.diskStorage({
       destination: (req, file, cb) => cb(null, dir),
-      filename: (req, file, cb) => cb(null, `${crypto.randomBytes(16).toString('hex')}${extensionFor(file.mimetype)}`),
+      filename: (req, file, cb) => cb(null, `${crypto.randomBytes(16).toString('hex')}${fileExtension(file) || '.bin'}`),
     }),
     limits: { fileSize: 100 * 1024 * 1024 },
   }).single('file');
   return (req, res, next) => {
     middleware(req, res, (error) => {
-      if (error) return res.status(400).json({ error: 'No se pudo subir el archivo. El máximo es 100 MB.' });
-      if (req.file && !allowed.includes(req.file.mimetype)) {
+      if (error) {
+        const tooBig = error.code === 'LIMIT_FILE_SIZE';
+        return res.status(400).json({ error: tooBig ? 'El archivo pesa más de 100 MB. Comprime el video o usa un enlace de YouTube.' : 'No se pudo subir el archivo.' });
+      }
+      if (req.file && !accept(req.file)) {
         fs.unlink(req.file.path, () => {});
-        return res.status(400).json({ error: 'Ese formato no está permitido.' });
+        return res.status(400).json({ error: rejectedMessage });
       }
       next();
     });
   };
 }
 
-const imageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-const videoTypes = ['video/mp4', 'video/webm', 'video/quicktime'];
-const uploadReceipt = uploadSingle(receiptDir, [...imageTypes, 'application/pdf']);
-const uploadMedia = uploadSingle(mediaDir, [...imageTypes, ...videoTypes]);
+const uploadReceipt = uploadSingle(receiptDir, (file) => ['.jpg', '.png', '.webp', '.gif', '.pdf'].includes(fileExtension(file)), 'El comprobante debe ser una imagen o un PDF.');
+const uploadMedia = uploadSingle(mediaDir, (file) => ['.jpg', '.png', '.webp', '.gif', '.mp4', '.webm', '.mov'].includes(fileExtension(file)), 'Usa una imagen o un video MP4, WEBM o MOV.');
 
 function cleanUsername(value) {
   const username = String(value || '').trim();
@@ -1390,10 +1408,17 @@ app.post('/api/screens/play', requireAuth, uploadMedia, (req, res) => {
     }
   } else if (kind === 'image' || kind === 'video') {
     if (!req.file) return res.status(400).json({ error: kind === 'image' ? 'Selecciona una imagen.' : 'Selecciona un video.' });
-    const allowed = kind === 'image' ? imageTypes : videoTypes;
-    if (!allowed.includes(req.file.mimetype)) {
+    const ext = fileExtension(req.file);
+    const imageExt = ['.jpg', '.png', '.webp', '.gif'];
+    const videoExt = ['.mp4', '.webm', '.mov'];
+    const valid = kind === 'image' ? imageExt.includes(ext) : videoExt.includes(ext);
+    if (!valid) {
       fs.unlink(req.file.path, () => {});
-      return res.status(400).json({ error: kind === 'image' ? 'La imagen debe ser JPG, PNG, WEBP o GIF.' : 'El video debe ser MP4, WEBM o MOV.' });
+      return res.status(400).json({
+        error: kind === 'image'
+          ? 'La imagen debe ser JPG, PNG, WEBP o GIF.'
+          : 'El video debe ser MP4, WEBM o MOV. Si es otro formato, pásalo a MP4.',
+      });
     }
     source = req.file.filename;
   } else {

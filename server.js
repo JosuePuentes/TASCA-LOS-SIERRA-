@@ -169,6 +169,9 @@ if (!columnNames('tickets').includes('receipt_file')) db.exec('ALTER TABLE ticke
 if (!columnNames('screens').includes('play_seconds')) db.exec('ALTER TABLE screens ADD COLUMN play_seconds REAL');
 if (!columnNames('screens').includes('play_at')) db.exec('ALTER TABLE screens ADD COLUMN play_at TEXT');
 if (!columnNames('screens').includes('play_mark')) db.exec('ALTER TABLE screens ADD COLUMN play_mark TEXT');
+if (!columnNames('purchase_items').includes('delivered_marks')) {
+  db.exec('ALTER TABLE purchase_items ADD COLUMN delivered_marks TEXT');
+}
 
 let seededAdmin = false;
 const userCount = num(db.prepare('SELECT COUNT(*) AS n FROM users').get().n);
@@ -328,9 +331,42 @@ function saveComboParts(comboId, parts) {
   for (const part of parts) insert.run(comboId, part.productId, part.quantity);
 }
 
+function marksFor(row) {
+  const quantity = num(row.quantity);
+  const delivered = Math.min(num(row.delivered), quantity);
+  const marks = [];
+  const seen = new Set();
+  if (row.delivered_marks) {
+    try {
+      const parsed = JSON.parse(row.delivered_marks);
+      if (Array.isArray(parsed)) {
+        for (const value of parsed) {
+          const number = Number(value);
+          if (!Number.isInteger(number) || number < 1 || number > quantity || seen.has(number)) continue;
+          marks.push(number);
+          seen.add(number);
+        }
+      }
+    } catch {
+      marks.length = 0;
+      seen.clear();
+    }
+  }
+  if (marks.length < delivered) {
+    for (let number = 1; number <= quantity && marks.length < delivered; number += 1) {
+      if (seen.has(number)) continue;
+      marks.push(number);
+      seen.add(number);
+    }
+  }
+  marks.sort((left, right) => left - right);
+  return marks;
+}
+
 function presentItem(row) {
   const quantity = num(row.quantity);
-  const delivered = num(row.delivered);
+  const deliveredUnits = marksFor(row);
+  const delivered = deliveredUnits.length;
   return {
     id: num(row.id),
     purchaseId: num(row.purchase_id),
@@ -339,6 +375,7 @@ function presentItem(row) {
     unitPriceCents: num(row.unit_price_cents),
     quantity,
     delivered,
+    deliveredUnits,
     remaining: quantity - delivered,
     totalCents: quantity * num(row.unit_price_cents),
   };
@@ -594,6 +631,7 @@ const API_RULES = [
   { test: /^\/api\/tickets\/search$/, modules: ['visor'] },
   { test: /^\/api\/tickets\/\d+\/receipt$/, modules: ['visor', 'entradas'] },
   { test: /^\/api\/tickets\/code\//, modules: ['visor'] },
+  { test: /^\/api\/visor\/sales$/, modules: ['visor'] },
   { test: /^\/api\/products(\/|$)/, modules: ['inventario'] },
   { test: /^\/api\/combos(\/|$)/, modules: ['inventario'] },
   { test: /^\/api\/purchases\/\d+\/(payment|deliver)$/, modules: ['visor'] },
@@ -1322,30 +1360,83 @@ app.patch('/api/purchases/:id/payment', requireAuth, (req, res) => {
   res.json({ ticket: withPurchases(getTicket(ticket.code)) });
 });
 
+app.get('/api/visor/sales', requireAuth, (req, res) => {
+  const query = String(req.query.q || '').trim().slice(0, 80);
+  const params = [];
+  let where = '';
+  if (query) {
+    where = `WHERE pi.product_name LIKE ? COLLATE NOCASE
+      OR t.code LIKE ? COLLATE NOCASE
+      OR COALESCE(t.alias, '') LIKE ? COLLATE NOCASE
+      OR t.event_name LIKE ? COLLATE NOCASE`;
+    const like = `%${query.replace(/[%_]/g, '')}%`;
+    params.push(like, like, like, like);
+  }
+  const rows = db.prepare(`
+    SELECT pi.*, p.payment_method, p.created_at AS purchased_at, t.code, t.alias, t.event_name, t.status
+    FROM purchase_items pi
+    JOIN purchases p ON p.id = pi.purchase_id
+    JOIN tickets t ON t.id = p.ticket_id
+    ${where}
+    ORDER BY p.created_at DESC, pi.id DESC
+    LIMIT 80
+  `).all(...params);
+  res.json({
+    sales: rows.map((row) => ({
+      ...presentItem(row),
+      itemId: num(row.id),
+      paymentMethod: row.payment_method || '',
+      createdAt: row.purchased_at,
+      ticketCode: row.code || '',
+      alias: row.alias || '',
+      eventName: row.event_name || '',
+      ticketStatus: row.status || '',
+    })),
+  });
+});
+
 app.post('/api/purchases/:id/deliver', requireAuth, (req, res) => {
   const id = Number(req.params.id);
   const purchase = db.prepare('SELECT * FROM purchases WHERE id = ?').get(id);
   if (!purchase) return res.status(404).json({ error: 'No se encontró la compra.' });
   if (!Array.isArray(req.body.lines) || !req.body.lines.length) {
-    return res.status(400).json({ error: 'Indica cuántas unidades vas a entregar.' });
+    return res.status(400).json({ error: 'Selecciona los números que vas a entregar.' });
   }
-  const deliver = db.prepare(`
-    UPDATE purchase_items
-    SET delivered = delivered + ?
-    WHERE id = ? AND purchase_id = ? AND delivered + ? <= quantity
-  `);
+  const saveMarks = db.prepare('UPDATE purchase_items SET delivered = ?, delivered_marks = ? WHERE id = ? AND purchase_id = ?');
   db.exec('BEGIN');
   try {
     for (const raw of req.body.lines) {
       const itemId = Number(raw?.itemId);
-      const quantity = wholeNumber(raw?.quantity, 1, 500);
       const item = db.prepare('SELECT * FROM purchase_items WHERE id = ? AND purchase_id = ?').get(itemId, id);
-      if (!item || quantity == null) throw httpError(400, 'Revisa las cantidades a entregar.');
-      const remaining = num(item.quantity) - num(item.delivered);
-      if (quantity > remaining) {
-        throw httpError(400, `No puedes entregar más ${item.product_name} de lo facturado. Quedan ${remaining}.`);
+      if (!item) throw httpError(400, 'No se encontró esa factura.');
+      const quantity = num(item.quantity);
+      const current = marksFor(item);
+      const taken = new Set(current);
+      let picked = [];
+      if (Array.isArray(raw.units)) {
+        if (!raw.units.length || raw.units.length > 500) throw httpError(400, 'Selecciona los números que vas a entregar.');
+        for (const value of raw.units) {
+          const number = Number(value);
+          if (!Number.isInteger(number) || number < 1 || number > quantity) {
+            throw httpError(400, `El número ${value} no está en esta factura.`);
+          }
+          if (taken.has(number) || picked.includes(number)) {
+            throw httpError(400, `El número ${number} ya está entregado.`);
+          }
+          picked.push(number);
+        }
+      } else {
+        const count = wholeNumber(raw?.quantity, 1, 500);
+        if (count == null) throw httpError(400, 'Revisa las cantidades a entregar.');
+        for (let number = 1; number <= quantity && picked.length < count; number += 1) {
+          if (!taken.has(number)) picked.push(number);
+        }
+        if (picked.length !== count) {
+          throw httpError(400, `No puedes entregar más ${item.product_name} de lo facturado. Quedan ${quantity - current.length}.`);
+        }
       }
-      const info = deliver.run(quantity, itemId, id, quantity);
+      const next = [...current, ...picked].sort((left, right) => left - right);
+      const info = saveMarks.run(next.length, JSON.stringify(next), itemId, id);
       if (!num(info.changes)) throw httpError(400, `No se pudo registrar la entrega de ${item.product_name}.`);
     }
     db.exec('COMMIT');

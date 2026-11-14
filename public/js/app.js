@@ -16,6 +16,9 @@ const state = {
   currentTicket: null,
   cart: [],
   delivery: null,
+  board: [],
+  boardQuery: '',
+  sheet: null,
   moves: null,
   moveQuery: { preset: 'month', from: '', to: '', q: '', kind: '' },
   moveError: '',
@@ -49,6 +52,7 @@ let scanTimer = null;
 let screenTimer = null;
 let screenBoot = null;
 let buyGuard = 0;
+let salesTimer = 0;
 let youtubeSeconds = null;
 let screenReady = true;
 
@@ -486,6 +490,12 @@ function visorView() {
       </section>
       <section>
         <div id="visor-account"></div>
+        <section class="card">
+          <h3>Ventas</h3>
+          <p class="lead page-lead">Busca lo que vendiste. Al tocarlo se abre la planilla con un número por cada unidad.</p>
+          <label class="field"><span>Buscar venta</span><input id="sales-search" type="search" placeholder="Producto, alias o código" autocomplete="off" value="${esc(state.boardQuery || '')}"></label>
+          <div id="sales-board">${salesBoardHtml()}</div>
+        </section>
         <h3>Lecturas de esta sesión</h3>
         <div id="visor-log" class="read-log" style="margin-top:12px"></div>
       </section>
@@ -720,13 +730,10 @@ function accountPanel(ticket) {
         <select data-pay="${purchase.id}" aria-label="Método de pago">${paymentOptions(purchase.paymentMethod)}</select>
       </div>
       ${purchase.items.map((item) => `
-        <div class="balance">
-          <div>
-            <strong>${esc(item.productName)}</strong>
-            <p class="hint">${item.quantity} facturadas · ${money(item.totalCents)} · Entregadas ${item.delivered} · Quedan ${item.remaining}</p>
-          </div>
-          ${item.remaining > 0 ? `<button class="btn small primary" type="button" data-action="deliver-item" data-purchase="${purchase.id}" data-item="${item.id}">Entregar</button>` : '<span class="badge ok">Entregado</span>'}
-        </div>`).join('')}
+        <button class="sale-hit" type="button" data-action="open-sheet" data-id="${item.id}">
+          <strong>${esc(item.productName)}</strong>
+          <span>${item.quantity} vendidas · ${money(item.totalCents)} · Entregadas ${item.delivered} · Quedan ${item.remaining}</span>
+        </button>`).join('')}
     </article>`).join('');
   return `
     <section class="card" style="margin-bottom:16px">
@@ -833,32 +840,111 @@ function buyModal() {
     </div>`;
 }
 
-function deliverModal() {
-  const delivery = state.delivery;
-  if (!delivery) return '';
-  const lines = delivery.lines.map((line) => `
-    <div class="balance">
-      <div>
-        <strong>${esc(line.productName)}</strong>
-        <p class="hint">Compró ${line.quantity} · Entregadas ${line.delivered} · Quedan ${line.remaining}</p>
-      </div>
-      <label class="field" style="margin:0;width:140px">
-        <span>Entregar ahora</span>
-        <input data-item="${line.id}" type="number" min="1" max="${line.remaining}" placeholder="Cuántas">
-      </label>
-    </div>`).join('');
+function salesBoardHtml() {
+  if (!state.board.length) {
+    return `<div class="empty"><h3>${state.boardQuery ? 'Ninguna venta coincide' : 'Todavía no hay ventas'}</h3><p class="lead">${state.boardQuery ? 'Prueba con otro producto, alias o código.' : 'Cuando factures en un QR, cada venta aparece aquí.'}</p></div>`;
+  }
+  return state.board.map((sale) => `
+    <button class="sale-hit" type="button" data-action="open-sheet" data-id="${sale.itemId}">
+      <strong>${esc(sale.productName)}</strong>
+      <span>${esc(sale.alias || sale.ticketCode)} · ${sale.quantity} vendidas · Entregadas ${sale.delivered} · Quedan ${sale.remaining}</span>
+    </button>`).join('');
+}
+
+function findSale(itemId) {
+  const id = Number(itemId);
+  const fromBoard = state.board.find((sale) => sale.itemId === id || sale.id === id);
+  if (fromBoard) return fromBoard;
+  for (const purchase of state.currentTicket?.purchases || []) {
+    const item = purchase.items.find((line) => line.id === id);
+    if (!item) continue;
+    return {
+      ...item,
+      itemId: item.id,
+      purchaseId: purchase.id,
+      ticketCode: state.currentTicket.code,
+      alias: state.currentTicket.alias || '',
+      eventName: state.currentTicket.eventName || '',
+    };
+  }
+  return null;
+}
+
+function unitButton(number, delivered, selected) {
+  const kind = delivered ? 'done' : selected ? 'pick' : 'free';
+  const label = delivered ? 'Entregado' : selected ? 'Seleccionado' : 'Disponible';
+  return `<button class="unit ${kind}" type="button" data-action="toggle-unit" data-n="${number}" ${delivered ? 'disabled' : ''} aria-label="Número ${number}, ${label}">${number}</button>`;
+}
+
+function sheetGrid() {
+  const sheet = state.sheet;
+  if (!sheet) return '';
+  const done = new Set(sheet.deliveredUnits || []);
+  const picked = new Set(sheet.selected || []);
+  let html = '';
+  for (let number = 1; number <= sheet.quantity; number += 1) html += unitButton(number, done.has(number), picked.has(number));
+  return html;
+}
+
+function sheetActions() {
+  const count = state.sheet?.selected?.length || 0;
+  const deliver = count
+    ? `<button class="btn primary" type="button" data-action="confirm-sheet">${count === 1 ? 'Entregar 1' : `Entregar ${count}`}</button>`
+    : '';
+  return `${deliver}<button class="btn ghost" type="button" data-action="close-sheet">Cerrar</button>`;
+}
+
+function sheetModal() {
+  const sheet = state.sheet;
+  if (!sheet) return '';
+  const who = sheet.alias || sheet.ticketCode || '';
   return `
-    <div class="modal-back" data-action="close-deliver">
-      <article class="modal card wide" data-stop>
-        <h2 style="font-size:36px">Entregar</h2>
-        <p class="lead page-lead">Elige cuántas entregar ahora. No puedes pasar de las que facturaste.</p>
-        <div id="deliver-lines" data-purchase="${delivery.purchaseId}">${lines}</div>
-        <div class="row-actions" style="margin-top:16px">
-          <button class="btn primary" type="button" data-action="confirm-delivery">Entregar ahora</button>
-          <button class="btn ghost" type="button" data-action="close-deliver">Dejar para después</button>
+    <div class="modal-back" data-action="close-sheet">
+      <article class="modal card wide sheet-modal" data-stop>
+        <p class="stub-kicker">${esc(who)}</p>
+        <h2 style="font-size:36px">${esc(sheet.productName)}</h2>
+        <p class="lead page-lead" id="sheet-status">${sheet.quantity} vendidas · Entregadas ${sheet.delivered} · Quedan ${sheet.remaining}</p>
+        <div class="paper">
+          <p class="paper-kicker">Planilla</p>
+          <div class="unit-grid" id="unit-grid">${sheetGrid()}</div>
+          <div class="sheet-legend">
+            <span><i class="legend-dot free"></i> Disponible</span>
+            <span><i class="legend-dot pick"></i> Seleccionado</span>
+            <span><i class="legend-dot done"></i> Entregado</span>
+          </div>
         </div>
+        <div class="row-actions" id="sheet-actions">${sheetActions()}</div>
       </article>
     </div>`;
+}
+
+function paintSheet() {
+  const grid = document.getElementById('unit-grid');
+  const status = document.getElementById('sheet-status');
+  const actions = document.getElementById('sheet-actions');
+  const sheet = state.sheet;
+  if (!grid || !sheet) {
+    mountModal(sheetModal());
+    return;
+  }
+  grid.innerHTML = sheetGrid();
+  if (status) status.textContent = `${sheet.quantity} vendidas · Entregadas ${sheet.delivered} · Quedan ${sheet.remaining}`;
+  if (actions) actions.innerHTML = sheetActions();
+}
+
+async function reloadBoard() {
+  const query = state.boardQuery || '';
+  const sales = (await api(`/api/visor/sales?q=${encodeURIComponent(query)}`)).sales;
+  if ((state.boardQuery || '') !== query) return;
+  state.board = sales;
+  const box = document.getElementById('sales-board');
+  if (box) box.innerHTML = salesBoardHtml();
+  if (!state.sheet) return;
+  const fresh = findSale(state.sheet.itemId);
+  if (!fresh) return;
+  const done = new Set(fresh.deliveredUnits || []);
+  state.sheet = { ...fresh, selected: (state.sheet.selected || []).filter((number) => !done.has(number)) };
+  paintSheet();
 }
 
 function paintVisor(ticket, note = '') {
@@ -1608,6 +1694,14 @@ async function render() {
       state.currentTicket = null;
       state.cart = [];
       state.delivery = null;
+      state.sheet = null;
+      mount(shell(loading()));
+      try {
+        state.board = (await api(`/api/visor/sales?q=${encodeURIComponent(state.boardQuery || '')}`)).sales;
+      } catch (error) {
+        state.board = [];
+      }
+      if (token !== renderToken) return;
       mount(shell(visorView()));
       renderLog();
       document.querySelector('#lookup-form input[name="code"]')?.focus();
@@ -2054,56 +2148,57 @@ async function onClick(event) {
       paintVisor(data.ticket, 'Compra registrada.');
       toast('Compra registrada. El inventario ya se descontó.');
       document.querySelector('.modal-back')?.remove();
-      state.delivery = { purchaseId: data.purchase.id, lines: data.purchase.items };
-      mountModal(deliverModal());
+      await reloadBoard();
     } catch (error) {
       toast(error.message, 'bad');
       control.disabled = false;
     }
     return;
   }
-  if (action === 'deliver-item') {
-    const purchase = state.currentTicket?.purchases?.find((item) => item.id === Number(control.dataset.purchase));
-    const line = purchase?.items.find((item) => item.id === Number(control.dataset.item));
-    if (!line || line.remaining < 1) return;
-    state.delivery = { purchaseId: purchase.id, lines: [line] };
-    mountModal(deliverModal());
+  if (action === 'open-sheet') {
+    const sale = findSale(control.dataset.id);
+    if (!sale) {
+      toast('No se encontró esa venta.', 'bad');
+      return;
+    }
+    state.sheet = { ...sale, selected: [] };
+    mountModal(sheetModal());
     return;
   }
-  if (action === 'close-deliver') {
-    state.delivery = null;
+  if (action === 'toggle-unit') {
+    const sheet = state.sheet;
+    const number = Number(control.dataset.n);
+    if (!sheet || !Number.isInteger(number)) return;
+    if ((sheet.deliveredUnits || []).includes(number)) return;
+    if (sheet.selected.includes(number)) sheet.selected = sheet.selected.filter((value) => value !== number);
+    else sheet.selected.push(number);
+    sheet.selected.sort((left, right) => left - right);
+    paintSheet();
+    return;
+  }
+  if (action === 'close-sheet') {
+    state.sheet = null;
     document.querySelector('.modal-back')?.remove();
     return;
   }
-  if (action === 'confirm-delivery') {
-    const purchaseId = document.getElementById('deliver-lines')?.dataset.purchase;
-    const lines = [...document.querySelectorAll('#deliver-lines input')].map((input) => ({
-      itemId: Number(input.dataset.item),
-      quantity: Number(input.value || 0),
-      max: Number(input.max),
-    }));
-    const chosen = lines.filter((line) => line.quantity > 0);
-    if (!chosen.length) {
-      toast('Escribe cuántas unidades vas a entregar.', 'bad');
-      return;
-    }
-    if (chosen.some((line) => !Number.isInteger(line.quantity) || line.quantity > line.max)) {
-      toast('No puedes entregar más de las facturadas.', 'bad');
+  if (action === 'confirm-sheet') {
+    const sheet = state.sheet;
+    if (!sheet?.selected?.length) {
+      toast('Selecciona los números que vas a entregar.', 'bad');
       return;
     }
     control.disabled = true;
     try {
-      const data = await api(`/api/purchases/${purchaseId}/deliver`, {
+      const data = await api(`/api/purchases/${sheet.purchaseId}/deliver`, {
         method: 'POST',
-        body: { lines: chosen.map((line) => ({ itemId: line.itemId, quantity: line.quantity })) },
+        body: { lines: [{ itemId: sheet.itemId, units: sheet.selected }] },
       });
-      state.delivery = null;
-      document.querySelector('.modal-back')?.remove();
-      paintVisor(data.ticket, 'Entrega registrada.');
-      toast('Entrega registrada.');
+      if (state.currentTicket?.code === data.ticket.code) paintVisor(data.ticket, 'Entrega registrada.');
+      await reloadBoard();
+      toast(sheet.selected.length === 1 ? 'Se entregó 1.' : `Se entregaron ${sheet.selected.length}.`);
     } catch (error) {
       toast(error.message, 'bad');
-      control.disabled = false;
+      if (document.body.contains(control)) control.disabled = false;
     }
     return;
   }
@@ -2321,6 +2416,13 @@ document.addEventListener('input', (event) => {
   if (event.target.id === 'buy-search') {
     const box = document.getElementById('buy-results');
     if (box) box.innerHTML = buyResultsHtml(event.target.value);
+  }
+  if (event.target.id === 'sales-search') {
+    state.boardQuery = event.target.value;
+    clearTimeout(salesTimer);
+    salesTimer = setTimeout(() => {
+      reloadBoard().catch((error) => toast(error.message, 'bad'));
+    }, 180);
   }
 });
 document.addEventListener('change', (event) => {

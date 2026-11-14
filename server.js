@@ -593,13 +593,13 @@ function uploadSingle(dir, accept, rejectedMessage) {
       destination: (req, file, cb) => cb(null, dir),
       filename: (req, file, cb) => cb(null, `${crypto.randomBytes(16).toString('hex')}${fileExtension(file) || '.bin'}`),
     }),
-    limits: { fileSize: 100 * 1024 * 1024 },
+    limits: { fileSize: 200 * 1024 * 1024 },
   }).single('file');
   return (req, res, next) => {
     middleware(req, res, (error) => {
       if (error) {
         const tooBig = error.code === 'LIMIT_FILE_SIZE';
-        return res.status(400).json({ error: tooBig ? 'El archivo pesa más de 100 MB. Comprime el video o usa un enlace de YouTube.' : 'No se pudo subir el archivo.' });
+        return res.status(400).json({ error: tooBig ? 'El archivo pesa más de 200 MB. Comprime el video o usa un enlace de YouTube.' : 'No se pudo subir el archivo.' });
       }
       if (req.file && !accept(req.file)) {
         fs.unlink(req.file.path, () => {});

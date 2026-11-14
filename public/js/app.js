@@ -1129,7 +1129,7 @@ function screensView() {
           <label class="field"><span>Título</span><input name="title" maxlength="80" placeholder="Promo de la noche"></label>
           <div class="choices">
             <label class="choice"><input type="radio" name="kind" value="image" checked><span><strong>Imagen</strong><small>JPG, PNG, WEBP o GIF.</small></span></label>
-            <label class="choice"><input type="radio" name="kind" value="video"><span><strong>Video</strong><small>MP4, WEBM o MOV, hasta 100 MB.</small></span></label>
+            <label class="choice"><input type="radio" name="kind" value="video"><span><strong>Video</strong><small>MP4, WEBM o MOV. En Vercel, solo hasta 4 MB; en Render, hasta 200 MB.</small></span></label>
             <label class="choice"><input type="radio" name="kind" value="youtube"><span><strong>YouTube</strong><small>Pega el enlace del video.</small></span></label>
           </div>
           <label class="field" id="screen-file-field"><span>Archivo</span><input name="file" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.m4v"></label>
@@ -1250,6 +1250,11 @@ async function renderScreen() {
 
 async function apiForm(path, formData) {
   const response = await fetch(path, { method: 'POST', credentials: 'same-origin', body: formData });
+  if (response.status === 413) {
+    const error = new Error('Vercel rechazó el video: pesa más de 4 MB. Entra en tasca-los-sierra.onrender.com para subirlo, o pega un enlace de YouTube.');
+    error.status = 413;
+    throw error;
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || 'No se pudo completar la acción.');
@@ -1512,7 +1517,18 @@ async function onSubmit(event) {
       if (mediaKind === 'youtube') {
         body.set('youtube', form.youtube.value);
       } else if (form.file.files[0]) {
-        body.set('file', form.file.files[0]);
+        const file = form.file.files[0];
+        const onVercel = location.hostname.endsWith('vercel.app');
+        if (mediaKind === 'video' && onVercel && file.size > 4 * 1024 * 1024) {
+          const mb = (file.size / (1024 * 1024)).toFixed(0);
+          setFormError(form, `Este video pesa ${mb} MB. Vercel solo acepta unos 4 MB. Súbelo en https://tasca-los-sierra.onrender.com o pega un enlace de YouTube.`);
+          return;
+        }
+        if (file.size > 200 * 1024 * 1024) {
+          setFormError(form, 'El video pesa más de 200 MB. Comprime el archivo o usa un enlace de YouTube.');
+          return;
+        }
+        body.set('file', file);
       } else {
         setFormError(form, mediaKind === 'video' ? 'Selecciona un video.' : 'Selecciona una imagen.');
         return;

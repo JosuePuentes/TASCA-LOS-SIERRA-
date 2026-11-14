@@ -698,6 +698,12 @@ function refreshBuyCart() {
   if (button) button.disabled = state.cart.length === 0;
 }
 
+function mountModal(html) {
+  document.querySelector('.modal-back')?.remove();
+  const host = document.querySelector('.shell') || document.body;
+  host.insertAdjacentHTML('beforeend', html);
+}
+
 function buyModal() {
   return `
     <div class="modal-back" data-action="close-buy">
@@ -1746,11 +1752,9 @@ async function onClick(event) {
     await navigate(link.getAttribute('href'));
     return;
   }
-  if (event.target.closest('[data-stop]')) {
-    const actionHost = event.target.closest('[data-action]');
-    if (!actionHost) return;
-  }
+  const stopped = event.target.closest('[data-stop]');
   const control = event.target.closest('[data-action]');
+  if (stopped && (!control || !stopped.contains(control))) return;
   if (!control) return;
   const action = control.dataset.action;
   if (action === 'menu') {
@@ -1857,8 +1861,7 @@ async function onClick(event) {
       state.products = (await api('/api/products')).products;
       state.cart = [];
       buyGuard = Date.now() + 600;
-      document.querySelector('.modal-back')?.remove();
-      document.body.insertAdjacentHTML('beforeend', buyModal());
+      mountModal(buyModal());
       document.getElementById('buy-search')?.focus();
     } catch (error) {
       toast(error.message, 'bad');
@@ -1917,7 +1920,7 @@ async function onClick(event) {
       toast('Compra registrada. El inventario ya se descontó.');
       document.querySelector('.modal-back')?.remove();
       state.delivery = { purchaseId: data.purchase.id, lines: data.purchase.items };
-      document.body.insertAdjacentHTML('beforeend', deliverModal());
+      mountModal(deliverModal());
     } catch (error) {
       toast(error.message, 'bad');
       control.disabled = false;
@@ -1929,8 +1932,7 @@ async function onClick(event) {
     const line = purchase?.items.find((item) => item.id === Number(control.dataset.item));
     if (!line || line.remaining < 1) return;
     state.delivery = { purchaseId: purchase.id, lines: [line] };
-    document.querySelector('.modal-back')?.remove();
-    document.body.insertAdjacentHTML('beforeend', deliverModal());
+    mountModal(deliverModal());
     return;
   }
   if (action === 'close-deliver') {

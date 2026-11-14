@@ -210,7 +210,7 @@ function shell(content) {
     ['/panel/usuarios', 'Usuarios', 'usuarios'],
   ].filter((item) => allow(item[2]));
   return `
-    <div class="shell">
+    <div class="shell public">
       <div class="backdrop" data-action="menu"></div>
       <aside class="sidebar">
         <a class="brand brand-light" href="/" data-link>${mark()}<span>Los Sierra</span></a>
@@ -238,21 +238,13 @@ function loading() {
   return `<p class="lead">Cargando…</p>`;
 }
 
-function homeView(events) {
-  const cards = events.length
-    ? events.map((event) => `
-        <article class="event-card">
-          <h3>${esc(event.name)}</h3>
-          <p class="price">${money(event.priceCents)}</p>
-        </article>`).join('')
-    : `<div class="empty"><h3>La noche todavía no tiene sesiones</h3><p class="lead">Cuando se publique una, el nombre y el precio de la entrada aparecen aquí.</p></div>`;
+function homeView() {
   return `
     <div class="public">
       <header class="topnav">
         <div class="wrap nav-inner">
           <a class="brand" href="/" data-link>${mark()}<span>Tasca Los Sierra</span></a>
           <nav class="nav-links">
-            <a href="#sesiones">Sesiones</a>
             <a class="btn amber small" href="${state.user ? '/panel' : '/acceso'}" data-link>${state.user ? 'Panel' : 'Acceso'}</a>
           </nav>
         </div>
@@ -261,27 +253,10 @@ function homeView(events) {
         <div class="wrap">
           <p class="eyebrow">Noche electro</p>
           <h1>Tasca Los Sierra</h1>
-          <p class="lead">El pulso de la noche. Aquí ves las sesiones y el precio de cada entrada. El personal entra por el acceso para emitir y comprobar los códigos.</p>
+          <p class="lead">Disfruta tu noche.</p>
           <div class="eq" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
-          <div class="hero-actions">
-            <a class="btn amber" href="#sesiones">Ver sesiones</a>
-            <a class="btn ghost" href="${state.user ? '/panel' : '/acceso'}" data-link>${state.user ? 'Ir al panel' : 'Acceso del personal'}</a>
-          </div>
         </div>
       </section>
-      <div class="note-strip"><div class="wrap"><p>Cada entrada lleva un código QR que caduca a las 12 horas. Un mismo código puede cubrir a varias personas.</p></div></div>
-      <section class="section" id="sesiones">
-        <div class="wrap">
-          <div class="section-head">
-            <div>
-              <h2>Sesiones</h2>
-              <p class="lead">Nombre y precio de cada entrada.</p>
-            </div>
-          </div>
-          <div class="event-grid">${cards}</div>
-        </div>
-      </section>
-      <footer class="footer"><div class="wrap"><p>Tasca Los Sierra · Electro</p><p>En el celular, usa el menú del navegador y elige Agregar a la pantalla de inicio. Se abre a pantalla completa, como una app.</p></div></footer>
     </div>`;
 }
 
@@ -1242,10 +1217,7 @@ async function render() {
 
   try {
     if (path === '/') {
-      mount(homeView([]));
-      const data = await api('/api/public/events');
-      if (token !== renderToken) return;
-      mount(homeView(data.events));
+      mount(homeView());
       return;
     }
     if (path === '/acceso') {

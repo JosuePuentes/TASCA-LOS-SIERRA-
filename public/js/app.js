@@ -245,54 +245,55 @@ function homeView(events) {
           <h3>${esc(event.name)}</h3>
           <p class="price">${money(event.priceCents)}</p>
         </article>`).join('')
-    : `<div class="empty"><h3>La cartelera está en blanco</h3><p class="lead">Cuando el personal publique un evento, el nombre y el precio aparecerán aquí.</p></div>`;
+    : `<div class="empty"><h3>La noche todavía no tiene sesiones</h3><p class="lead">Cuando se publique una, el nombre y el precio de la entrada aparecen aquí.</p></div>`;
   return `
     <div class="public">
       <header class="topnav">
         <div class="wrap nav-inner">
           <a class="brand" href="/" data-link>${mark()}<span>Tasca Los Sierra</span></a>
           <nav class="nav-links">
-            <a href="#cartelera">Cartelera</a>
+            <a href="#sesiones">Sesiones</a>
             <a class="btn amber small" href="${state.user ? '/panel' : '/acceso'}" data-link>${state.user ? 'Panel' : 'Acceso'}</a>
           </nav>
         </div>
       </header>
       <section class="hero">
         <div class="wrap">
-          <p class="eyebrow">Casa de comidas y copas</p>
+          <p class="eyebrow">Noche electro</p>
           <h1>Tasca Los Sierra</h1>
-          <p class="lead">La cartelera de la casa, con el precio de cada evento a la vista. El personal entra por el acceso para emitir y comprobar las entradas.</p>
+          <p class="lead">El pulso de la noche. Aquí ves las sesiones y el precio de cada entrada. El personal entra por el acceso para emitir y comprobar los códigos.</p>
+          <div class="eq" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
           <div class="hero-actions">
-            <a class="btn amber" href="#cartelera">Ver cartelera</a>
-            <a class="btn ghost" href="${state.user ? '/panel' : '/acceso'}" data-link style="color:#f6efe4;border-color:rgba(246,239,228,.35)">${state.user ? 'Ir al panel' : 'Acceso del personal'}</a>
+            <a class="btn amber" href="#sesiones">Ver sesiones</a>
+            <a class="btn ghost" href="${state.user ? '/panel' : '/acceso'}" data-link>${state.user ? 'Ir al panel' : 'Acceso del personal'}</a>
           </div>
         </div>
       </section>
       <div class="note-strip"><div class="wrap"><p>Cada entrada lleva un código QR que caduca a las 12 horas. Un mismo código puede cubrir a varias personas.</p></div></div>
-      <section class="section" id="cartelera">
+      <section class="section" id="sesiones">
         <div class="wrap">
           <div class="section-head">
             <div>
-              <h2>Cartelera</h2>
-              <p class="lead">Nombre y precio de lo que está a la venta.</p>
+              <h2>Sesiones</h2>
+              <p class="lead">Nombre y precio de cada entrada.</p>
             </div>
           </div>
           <div class="event-grid">${cards}</div>
         </div>
       </section>
-      <footer class="footer"><div class="wrap">Tasca Los Sierra</div></footer>
+      <footer class="footer"><div class="wrap">Tasca Los Sierra · Electro</div></footer>
     </div>`;
 }
 
 function loginView(error = '') {
   return `
-    <div class="login-split">
+    <div class="login-split public">
       <aside class="login-aside">
         <a class="brand" href="/" data-link>${mark()}<span>Tasca Los Sierra</span></a>
         <div>
           <p class="eyebrow">Personal</p>
-          <h1>La puerta de la casa.</h1>
-          <p class="lead" style="color:#eadfce;margin-top:16px">Desde aquí se publican los precios, se emiten las entradas y se comprueban los códigos.</p>
+          <h1>La puerta de la noche.</h1>
+          <p class="lead" style="margin-top:16px">Desde aquí se publican las sesiones, se emiten las entradas y se comprueban los códigos.</p>
         </div>
       </aside>
       <main class="login-main">
@@ -390,7 +391,7 @@ function eventsView() {
 
 function issuedView() {
   if (!state.issued) {
-    return `<section class="card"><h3>Cómo se emite</h3><p class="lead" style="margin-top:8px">Elige el evento y cuántas personas entran. Puedes dar un QR a cada persona, o un solo QR enlazado a varias entradas. El código caduca a las 12 horas.</p></section>`;
+    return `<section class="card"><h3>Cómo se emite</h3><p class="lead" style="margin-top:8px">Elige el evento, cuántas personas entran, el alias y cómo pagaron. El comprobante es opcional. Puedes dar un QR a cada persona, o un solo QR enlazado a varias entradas. El código caduca a las 12 horas.</p></section>`;
   }
   const issued = state.issued;
   return `
@@ -405,8 +406,10 @@ function issuedView() {
             <div class="stub-body">
               <p class="stub-kicker">Tasca Los Sierra</p>
               <h3>${esc(ticket.eventName)}</h3>
+              ${ticket.alias ? `<p>${esc(ticket.alias)}</p>` : ''}
               <p>${entradasLabel(ticket.quantity)}</p>
-              <p class="price-line">${money(ticket.totalCents)}</p>
+              <p class="price-line">${money(ticket.totalCents)} · ${esc(paymentLabel(ticket.paymentMethod))}</p>
+              ${ticket.hasReceipt ? `<a class="btn ghost small" href="/api/tickets/${ticket.id}/receipt" target="_blank" rel="noopener">Ver comprobante</a>` : ''}
               <p class="hint" style="margin-top:8px">${ticket.status === 'active' ? `Vence ${esc(formatDateTime(ticket.expiresAt))}<br>Quedan ${esc(remaining(ticket.expiresAt))}` : esc(whenText(ticket))}</p>
               <p class="code" style="margin-top:10px">${esc(ticket.code)}</p>
               <button class="btn ghost small no-print" type="button" data-action="download" data-code="${esc(ticket.code)}" style="margin-top:10px">Descargar QR</button>
@@ -425,6 +428,9 @@ function createView() {
         <h2>Emitir</h2>
         <label class="field"><span>Evento</span><select name="eventId">${options}</select></label>
         <label class="field"><span>Cantidad de entradas</span><input name="quantity" type="number" min="1" max="100" value="1" required></label>
+        <label class="field"><span>Alias</span><input name="alias" maxlength="40" placeholder="Nombre de quien entra"></label>
+        <label class="field"><span>Método de pago</span><select name="paymentMethod" required>${paymentOptions('efectivo')}</select></label>
+        <label class="field"><span>Comprobante, opcional</span><input name="file" type="file" accept="image/*,.pdf"></label>
         <div class="choices">
           <label class="choice"><input type="radio" name="mode" value="individual" checked><span><strong>Un QR por entrada</strong><small>Cada persona recibe su propio código.</small></span></label>
           <label class="choice"><input type="radio" name="mode" value="group"><span><strong>Un QR para varias entradas</strong><small>Un solo código queda enlazado a todo el grupo.</small></span></label>
@@ -449,8 +455,10 @@ function resultView(ticket, note = '') {
       <h2>${title}</h2>
       <p class="people">${ticket.quantity}</p>
       <p>${entradasLabel(ticket.quantity)}</p>
-      <h3 style="margin-top:12px">${esc(ticket.eventName)}</h3>
-      <p class="price-line">${money(ticket.totalCents)} · ${esc(whenText(ticket))}</p>
+      <h3 style="margin-top:12px">${esc(ticket.alias || ticket.eventName)}</h3>
+      ${ticket.alias ? `<p class="price-line">${esc(ticket.eventName)}</p>` : ''}
+      <p class="price-line">${money(ticket.totalCents)} · ${esc(paymentLabel(ticket.paymentMethod))} · ${esc(whenText(ticket))}</p>
+      ${ticket.hasReceipt ? `<p style="margin-top:8px"><a class="btn ghost small" href="/api/tickets/${ticket.id}/receipt" target="_blank" rel="noopener">Ver comprobante</a></p>` : ''}
       ${note ? `<p style="margin-top:10px">${esc(note)}</p>` : ''}
       <div class="row-actions" style="margin-top:16px">
         ${action}
@@ -471,9 +479,9 @@ function visorView() {
     <div class="visor-grid">
       <section class="card">
         <h2>Visor QR</h2>
-        <p class="lead page-lead">Consulta el código, registra el ingreso y carga las compras de esa mesa. Lo facturado se descuenta del inventario; luego eliges cuántas unidades entregar.</p>
+        <p class="lead page-lead">Escanea el QR o busca por el alias. También puedes registrar el ingreso y cargar las compras de esa entrada.</p>
         <form id="lookup-form" data-form="lookup">
-          <label class="field"><span>Código</span><input name="code" autocomplete="off" spellcheck="false" placeholder="LS-XXXXXXXXXX" required></label>
+          <label class="field"><span>Código o alias</span><input name="code" autocomplete="off" spellcheck="false" placeholder="Código o nombre" required></label>
           <div class="row-actions">
             <button class="btn primary" type="submit">Consultar</button>
             ${canCamera ? '<button class="btn ghost" type="button" data-action="camera">Usar cámara</button>' : ''}
@@ -817,18 +825,41 @@ function rememberRead(ticket) {
   state.reads = [ticket, ...state.reads.filter((item) => item.code !== ticket.code)].slice(0, 6);
 }
 
+function resultChoices(tickets) {
+  return `
+    <article class="result">
+      <h2>Varias entradas</h2>
+      <p class="lead">Elige cuál quieres abrir.</p>
+      <div class="read-log" style="margin-top:12px">
+        ${tickets.map((ticket) => `<button type="button" data-action="show-read" data-code="${esc(ticket.code)}"><strong>${esc(ticket.alias || ticket.eventName)}</strong><br><span class="hint">${esc(ticket.code)} · ${esc(ticket.eventName)} · ${esc(paymentLabel(ticket.paymentMethod))}</span></button>`).join('')}
+      </div>
+    </article>`;
+}
+
 async function lookupCode(raw) {
-  const code = normalizeCode(raw);
+  const text = String(raw || '').trim();
   const box = document.getElementById('visor-result');
   if (!box) return;
   box.innerHTML = `<p class="lead">Consultando…</p>`;
   try {
-    const data = await api(`/api/tickets/code/${encodeURIComponent(code)}`);
-    paintVisor(data.ticket);
+    const data = await api(`/api/tickets/search?q=${encodeURIComponent(text)}`);
+    if (!data.tickets.length) {
+      state.currentTicket = null;
+      renderAccount();
+      box.innerHTML = resultMissing(text);
+      return;
+    }
+    if (data.tickets.length > 1) {
+      state.currentTicket = null;
+      renderAccount();
+      box.innerHTML = resultChoices(data.tickets);
+      return;
+    }
+    paintVisor(data.tickets[0]);
   } catch (error) {
     state.currentTicket = null;
     renderAccount();
-    box.innerHTML = error.status === 404 ? resultMissing(code) : `<article class="result bad"><h2>Error</h2><p>${esc(error.message)}</p></article>`;
+    box.innerHTML = error.status === 404 ? resultMissing(text) : `<article class="result bad"><h2>Error</h2><p>${esc(error.message)}</p></article>`;
   }
 }
 
@@ -1359,10 +1390,7 @@ async function onSubmit(event) {
       return;
     }
     if (kind === 'ticket') {
-      state.issued = await api('/api/tickets', {
-        method: 'POST',
-        body: { eventId: Number(values.eventId), quantity: Number(values.quantity), mode: values.mode },
-      });
+      state.issued = await apiForm('/api/tickets', new FormData(form));
       toast('Entradas emitidas.');
       mount(shell(createView()));
       updateTotal();

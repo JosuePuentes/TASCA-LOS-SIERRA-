@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import express from 'express';
 import session from 'express-session';
@@ -12,7 +12,10 @@ import QRCode from 'qrcode';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const QR_TTL_MS = 12 * 60 * 60 * 1000;
-const dataDir = path.join(process.env.LOCALAPPDATA || path.join(__dirname, 'data'), 'TascaLosSierra');
+const onVercel = Boolean(process.env.VERCEL);
+const dataDir = onVercel
+  ? path.join('/tmp', 'TascaLosSierra')
+  : path.join(process.env.LOCALAPPDATA || path.join(__dirname, 'data'), 'TascaLosSierra');
 const mediaDir = path.join(dataDir, 'uploads', 'media');
 const receiptDir = path.join(dataDir, 'uploads', 'receipts');
 fs.mkdirSync(mediaDir, { recursive: true });
@@ -145,6 +148,9 @@ if (!columnNames('purchases').includes('receipt_file')) {
 if (!columnNames('products').includes('cost_cents')) {
   db.exec('ALTER TABLE products ADD COLUMN cost_cents INTEGER NOT NULL DEFAULT 0');
 }
+if (!columnNames('tickets').includes('alias')) db.exec('ALTER TABLE tickets ADD COLUMN alias TEXT');
+if (!columnNames('tickets').includes('payment_method')) db.exec('ALTER TABLE tickets ADD COLUMN payment_method TEXT');
+if (!columnNames('tickets').includes('receipt_file')) db.exec('ALTER TABLE tickets ADD COLUMN receipt_file TEXT');
 
 let seededAdmin = false;
 const userCount = num(db.prepare('SELECT COUNT(*) AS n FROM users').get().n);
@@ -265,6 +271,9 @@ function presentTicket(row) {
     totalCents: num(row.quantity) * num(row.unit_price_cents),
     status: row.status,
     batchId: row.batch_id,
+    alias: row.alias || '',
+    paymentMethod: row.payment_method || '',
+    hasReceipt: Boolean(row.receipt_file),
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     usedAt: row.used_at,
@@ -279,6 +288,22 @@ function getTicket(code) {
   expireOld();
   const row = db.prepare('SELECT * FROM tickets WHERE code = ?').get(code);
   return row ? presentTicket(row) : null;
+}
+
+function findTickets(query) {
+  expireOld();
+  const text = String(query || '').trim();
+  const code = normalizeCode(text);
+  const exact = db.prepare('SELECT * FROM tickets WHERE code = ?').get(code);
+  if (exact) return [presentTicket(exact)];
+  const like = `%${text.replace(/[%_]/g, '')}%`;
+  if (like === '%%') return [];
+  return db.prepare(`
+    SELECT * FROM tickets
+    WHERE alias LIKE ? COLLATE NOCASE
+    ORDER BY created_at DESC
+    LIMIT 20
+  `).all(like).map(presentTicket);
 }
 
 async function withQr(ticket) {
@@ -462,6 +487,8 @@ const API_RULES = [
   { test: /^\/api\/summary$/, modules: ['resumen'] },
   { test: /^\/api\/events(\/|$)/, modules: ['eventos'] },
   { test: /^\/api\/tickets$/, modules: ['entradas'] },
+  { test: /^\/api\/tickets\/search$/, modules: ['visor'] },
+  { test: /^\/api\/tickets\/\d+\/receipt$/, modules: ['visor', 'entradas'] },
   { test: /^\/api\/tickets\/code\//, modules: ['visor'] },
   { test: /^\/api\/products(\/|$)/, modules: ['inventario'] },
   { test: /^\/api\/purchases\/\d+\/(payment|deliver)$/, modules: ['visor'] },
@@ -604,6 +631,7 @@ function presentScreen(row) {
 }
 
 const app = express();
+if (onVercel) app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 app.use(session({
   name: 'tasca.sid',
@@ -613,7 +641,7 @@ app.use(session({
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
-    secure: false,
+    secure: onVercel,
     maxAge: 7 * 24 * 60 * 60 * 1000,
   },
 }));
@@ -720,24 +748,43 @@ app.delete('/api/events/:id', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/tickets', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/tickets', requireAuth, uploadReceipt, asyncRoute(async (req, res) => {
   const eventId = Number(req.body.eventId);
   const quantity = Number(req.body.quantity);
   const mode = req.body.mode === 'group' ? 'group' : req.body.mode === 'individual' ? 'individual' : null;
-  if (!mode) return res.status(400).json({ error: 'Elige cómo se reparte el QR.' });
+  const alias = String(req.body.alias || '').trim();
+  const paymentMethod = String(req.body.paymentMethod || '');
+  const dropFile = () => { if (req.file) fs.unlink(req.file.path, () => {}); };
+  if (!mode) {
+    dropFile();
+    return res.status(400).json({ error: 'Elige cómo se reparte el QR.' });
+  }
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+    dropFile();
     return res.status(400).json({ error: 'La cantidad debe estar entre 1 y 100.' });
   }
+  if (alias.length > 40) {
+    dropFile();
+    return res.status(400).json({ error: 'El alias puede tener hasta 40 caracteres.' });
+  }
+  if (!PAYMENTS.has(paymentMethod)) {
+    dropFile();
+    return res.status(400).json({ error: 'Elige el método de pago.' });
+  }
   const event = db.prepare('SELECT * FROM events WHERE id = ?').get(eventId);
-  if (!event || !event.active) return res.status(400).json({ error: 'Elige un evento activo.' });
+  if (!event || !event.active) {
+    dropFile();
+    return res.status(400).json({ error: 'Elige un evento activo.' });
+  }
 
   const batchId = crypto.randomUUID();
   const createdAt = new Date();
   const expiresAt = new Date(createdAt.getTime() + QR_TTL_MS);
+  const receiptFile = req.file ? req.file.filename : null;
   const insert = db.prepare(`
     INSERT INTO tickets (
-      event_id, event_name, code, quantity, unit_price_cents, status, batch_id, created_at, expires_at
-    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      event_id, event_name, code, quantity, unit_price_cents, status, batch_id, created_at, expires_at, alias, payment_method, receipt_file
+    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
   `);
 
   const created = [];
@@ -754,6 +801,9 @@ app.post('/api/tickets', requireAuth, asyncRoute(async (req, res) => {
           batchId,
           createdAt.toISOString(),
           expiresAt.toISOString(),
+          alias,
+          paymentMethod,
+          receiptFile,
         );
         created.push(getTicket(code) || { id: num(info.lastInsertRowid), code, quantity: ticketQuantity });
         return;
@@ -784,6 +834,20 @@ app.post('/api/tickets', requireAuth, asyncRoute(async (req, res) => {
     tickets,
   });
 }));
+
+app.get('/api/tickets/search', requireAuth, asyncRoute(async (req, res) => {
+  const tickets = findTickets(req.query.q);
+  if (tickets.length === 1) {
+    return res.json({ tickets: [await withQr(withPurchases(tickets[0]))] });
+  }
+  res.json({ tickets });
+}));
+
+app.get('/api/tickets/:id/receipt', requireAuth, (req, res) => {
+  const ticket = db.prepare('SELECT receipt_file FROM tickets WHERE id = ?').get(Number(req.params.id));
+  if (!ticket?.receipt_file) return res.status(404).json({ error: 'Esta entrada no tiene comprobante.' });
+  res.sendFile(path.join(receiptDir, path.basename(ticket.receipt_file)));
+});
 
 app.get('/api/tickets/code/:code', requireAuth, asyncRoute(async (req, res) => {
   const ticket = getTicket(normalizeCode(req.params.code));
@@ -1328,6 +1392,10 @@ app.use((error, req, res, next) => {
   res.status(500).type('text').send('Ocurrió un problema interno.');
 });
 
+export default app;
+
+const isMain = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+if (isMain) {
 const server = app.listen(PORT, () => {
   console.log('');
   console.log('  Tasca Los Sierra');
@@ -1349,3 +1417,4 @@ server.on('error', (error) => {
   console.error(error);
   process.exit(1);
 });
+}

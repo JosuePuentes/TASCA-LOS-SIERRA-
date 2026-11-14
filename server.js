@@ -173,6 +173,33 @@ if (!columnNames('purchase_items').includes('delivered_marks')) {
   db.exec('ALTER TABLE purchase_items ADD COLUMN delivered_marks TEXT');
 }
 
+function allowProductDelete() {
+  if (!process.env.DATABASE_URL) return;
+  let rows = [];
+  try {
+    rows = db.prepare(`
+      SELECT rel.relname AS table_name, con.conname AS name
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+      JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+      JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = ANY (con.conkey)
+      WHERE nsp.nspname = 'public'
+        AND rel.relname IN ('purchase_items', 'combo_items')
+        AND att.attname = 'product_id'
+        AND con.contype = 'f'
+    `).all();
+  } catch (error) {
+    console.error('No se pudo revisar el inventario', error);
+    return;
+  }
+  for (const row of rows) {
+    if (!/^[a-z0-9_]+$/.test(row.table_name) || !/^[a-z0-9_]+$/.test(row.name)) continue;
+    db.exec(`ALTER TABLE ${row.table_name} DROP CONSTRAINT ${row.name}`);
+  }
+}
+
+allowProductDelete();
+
 let seededAdmin = false;
 const userCount = num(db.prepare('SELECT COUNT(*) AS n FROM users').get().n);
 if (userCount === 0) {
@@ -246,6 +273,15 @@ function unitsFromPack(count, unitsPerBox, pack, { min = 0 } = {}) {
   const units = amount * unitsPerBox;
   if (units > 1000000) return { error: 'Esa cantidad de cajas pasa de 1000000 unidades.' };
   return { units, note: `${amount} cajas × ${unitsPerBox} = ${units} unidades` };
+}
+
+function centsPerUnit(cents, unitsPerBox, mode) {
+  if (cents == null) return { cents: null };
+  if (mode !== 'box') return { cents };
+  if (!unitsPerBox || unitsPerBox < 2) {
+    return { error: 'Pon cuántas unidades trae la caja. Tiene que ser 2 o más.' };
+  }
+  return { cents: Math.round(cents / unitsPerBox) };
 }
 
 function presentProduct(row) {
@@ -1071,20 +1107,33 @@ app.get('/api/products', requireAuth, (req, res) => {
 
 app.post('/api/products', requireAuth, (req, res) => {
   const name = String(req.body.name || '').trim();
-  const costCents = toCents(req.body.cost);
-  const priceCents = toCents(req.body.price);
   const unitsPerBox = readUnitsPerBox(req.body.unitsPerBox, 1);
   const packed = unitsFromPack(req.body.stock, unitsPerBox, req.body.pack, { min: 0 });
+  const costPer = req.body.pack === 'box' ? 'box' : 'unit';
+  let costCents = toCents(req.body.cost);
+  let priceCents = toCents(req.body.price);
+  const boxPriceCents = req.body.boxPrice == null || req.body.boxPrice === '' ? null : toCents(req.body.boxPrice);
   if (name.length < 2 || name.length > 80) {
     return res.status(400).json({ error: 'El nombre debe tener entre 2 y 80 caracteres.' });
   }
+  if (unitsPerBox == null) return res.status(400).json({ error: 'Las unidades por caja tienen que ser un número entero entre 1 y 10000.' });
   if (costCents == null || costCents > 10000000) {
     return res.status(400).json({ error: 'Escribe el costo, con hasta dos decimales.' });
   }
-  if (priceCents == null || priceCents > 10000000) {
-    return res.status(400).json({ error: 'Escribe el precio de venta, con hasta dos decimales.' });
+  const costSplit = centsPerUnit(costCents, unitsPerBox, costPer);
+  if (costSplit.error) return res.status(400).json({ error: costSplit.error });
+  costCents = costSplit.cents;
+  if (priceCents == null && boxPriceCents != null) {
+    const priceSplit = centsPerUnit(boxPriceCents, unitsPerBox, 'box');
+    if (priceSplit.error) return res.status(400).json({ error: priceSplit.error });
+    priceCents = priceSplit.cents;
   }
-  if (unitsPerBox == null) return res.status(400).json({ error: 'Las unidades por caja tienen que ser un número entero entre 1 y 10000.' });
+  if (priceCents == null || priceCents > 10000000) {
+    return res.status(400).json({ error: 'Escribe el precio de venta por unidad, con hasta dos decimales.' });
+  }
+  if (costCents > 10000000) {
+    return res.status(400).json({ error: 'El costo por unidad queda demasiado alto.' });
+  }
   if (packed.error) return res.status(400).json({ error: packed.error });
   const info = db.prepare('INSERT INTO products (name, cost_cents, price_cents, stock, units_per_box, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)').run(
     name,
@@ -1175,16 +1224,27 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
   res.json({ product: presentProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
 });
 
+function removeProduct(id) {
+  const sqlite = !process.env.DATABASE_URL;
+  if (sqlite) db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec('BEGIN');
+    db.prepare('DELETE FROM combo_items WHERE combo_id = ? OR product_id = ?').run(id, id);
+    db.prepare('DELETE FROM products WHERE id = ?').run(id);
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* la transacción ya se cerró */ }
+    throw error;
+  } finally {
+    if (sqlite) db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
 app.delete('/api/products/:id', requireAuth, (req, res) => {
   const id = Number(req.params.id);
   const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   if (!current) return res.status(404).json({ error: 'No se encontró el producto.' });
-  const used = num(db.prepare('SELECT COUNT(*) AS n FROM purchase_items WHERE product_id = ?').get(id).n);
-  if (used) return res.status(409).json({ error: 'Este producto ya tiene compras. Desactívalo si ya no se vende.' });
-  const inCombo = num(db.prepare('SELECT COUNT(*) AS n FROM combo_items WHERE product_id = ?').get(id).n);
-  if (inCombo) return res.status(409).json({ error: 'Este producto está dentro de un combo. Quítalo del combo antes de eliminarlo.' });
-  if (current.is_combo) db.prepare('DELETE FROM combo_items WHERE combo_id = ?').run(id);
-  db.prepare('DELETE FROM products WHERE id = ?').run(id);
+  removeProduct(id);
   res.json({ ok: true });
 });
 
@@ -1237,10 +1297,7 @@ app.delete('/api/combos/:id', requireAuth, (req, res) => {
   const id = Number(req.params.id);
   const current = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 1').get(id);
   if (!current) return res.status(404).json({ error: 'No se encontró el combo.' });
-  const used = num(db.prepare('SELECT COUNT(*) AS n FROM purchase_items WHERE product_id = ?').get(id).n);
-  if (used) return res.status(409).json({ error: 'Este combo ya tiene ventas. Desactívalo si ya no se vende.' });
-  db.prepare('DELETE FROM combo_items WHERE combo_id = ?').run(id);
-  db.prepare('DELETE FROM products WHERE id = ?').run(id);
+  removeProduct(id);
   res.json({ ok: true });
 });
 

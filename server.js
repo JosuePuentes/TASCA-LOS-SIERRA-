@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { openDatabase } from './db.js';
 import express from 'express';
 import session from 'express-session';
 import bcrypt from 'bcryptjs';
@@ -22,7 +22,7 @@ fs.mkdirSync(mediaDir, { recursive: true });
 fs.mkdirSync(receiptDir, { recursive: true });
 const dbPath = path.join(dataDir, 'tasca.db');
 
-const db = new DatabaseSync(dbPath);
+const db = openDatabase(dbPath);
 db.exec(`
   PRAGMA foreign_keys = ON;
   PRAGMA journal_mode = WAL;
@@ -1443,7 +1443,7 @@ const server = app.listen(PORT, () => {
   console.log('');
   console.log('  Tasca Los Sierra');
   console.log(`  Abre http://localhost:${PORT}`);
-  console.log(`  Datos guardados en ${dbPath}`);
+  console.log(process.env.DATABASE_URL ? '  Datos guardados en PostgreSQL' : `  Datos guardados en ${dbPath}`);
   if (seededAdmin) {
     console.log('  Usuario inicial: admin');
     console.log('  Contraseña inicial: LosSierra12');

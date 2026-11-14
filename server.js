@@ -535,7 +535,25 @@ function logMovement(entry) {
 
 function youtubeId(value) {
   const text = String(value || '').trim();
-  const match = text.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{11})/);
+  if (/^[\w-]{11}$/.test(text)) return text;
+  try {
+    const url = new URL(text);
+    const host = url.hostname.replace(/^www\./, '');
+    if (host === 'youtu.be') {
+      const id = url.pathname.split('/').filter(Boolean)[0] || '';
+      return /^[\w-]{11}$/.test(id) ? id : null;
+    }
+    if (host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) {
+      const fromQuery = url.searchParams.get('v') || '';
+      if (/^[\w-]{11}$/.test(fromQuery)) return fromQuery;
+      const parts = url.pathname.split('/').filter(Boolean);
+      const id = ['embed', 'shorts', 'live', 'v'].includes(parts[0]) ? parts[1] : '';
+      return /^[\w-]{11}$/.test(id || '') ? id : null;
+    }
+  } catch {
+    // El texto no es una URL completa.
+  }
+  const match = text.match(/(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?v=|embed\/|shorts\/|live\/|v\/))([\w-]{11})/);
   return match ? match[1] : null;
 }
 
@@ -1343,6 +1361,20 @@ app.post('/api/screens/:id/clear', requireAuth, (req, res) => {
   if (!screen) return res.status(404).json({ error: 'No se encontró la pantalla.' });
   db.prepare(`UPDATE screens SET content_kind = NULL, content_source = NULL, content_title = NULL WHERE id = ?`).run(screen.id);
   res.json({ screen: presentScreen(db.prepare('SELECT * FROM screens WHERE id = ?').get(screen.id)) });
+});
+
+app.post('/api/screens/:id/share', requireAuth, (req, res) => {
+  const screen = db.prepare('SELECT * FROM screens WHERE id = ?').get(Number(req.params.id));
+  if (!screen) return res.status(404).json({ error: 'No se encontró la pantalla.' });
+  if (!screen.content_kind || !screen.content_source) return res.status(400).json({ error: 'Esta pantalla no está reproduciendo nada.' });
+  const target = String(req.body.target || '');
+  const others = target === 'all'
+    ? db.prepare(`SELECT * FROM screens WHERE status = 'linked' AND id != ?`).all(screen.id)
+    : db.prepare(`SELECT * FROM screens WHERE id = ? AND status = 'linked' AND id != ?`).all(Number(target), screen.id);
+  if (!others.length) return res.status(400).json({ error: 'Elige otra pantalla vinculada.' });
+  const update = db.prepare(`UPDATE screens SET content_kind = ?, content_source = ?, content_title = ? WHERE id = ?`);
+  for (const other of others) update.run(screen.content_kind, screen.content_source, screen.content_title, other.id);
+  res.json({ screens: db.prepare('SELECT * FROM screens ORDER BY status DESC, created_at DESC').all().map(presentScreen) });
 });
 
 app.post('/api/screens/play', requireAuth, uploadMedia, (req, res) => {

@@ -46,6 +46,7 @@ let stream = null;
 let scanTimer = null;
 let screenTimer = null;
 let screenBoot = null;
+let buyGuard = 0;
 
 const titles = {
   '/': 'Tasca Los Sierra',
@@ -617,36 +618,60 @@ function renderAccount() {
   if (box) box.innerHTML = accountPanel(state.currentTicket);
 }
 
+function buyMatches(query) {
+  const text = query.trim().toLocaleLowerCase('es');
+  return state.products
+    .filter((product) => product.active)
+    .filter((product) => !text || product.name.toLocaleLowerCase('es').includes(text))
+    .slice(0, 20);
+}
+
+function buyResultsHtml(query) {
+  if (!state.products.some((product) => product.active)) return `<p class="hint">El inventario está vacío. Carga productos antes de vender.</p>`;
+  const matches = buyMatches(query);
+  if (!matches.length) return `<p class="hint">Ningún producto coincide.</p>`;
+  return matches.map((product) => `
+    <button class="buy-hit" type="button" data-action="pick-product" data-id="${product.id}" ${product.stock < 1 ? 'disabled' : ''}>
+      <strong>${esc(product.name)}</strong>
+      <span>${money(product.priceCents)} · ${product.stock < 1 ? 'sin existencias' : `quedan ${product.stock}`}</span>
+    </button>`).join('');
+}
+
+function cartLinesHtml() {
+  if (!state.cart.length) return `<p class="hint">Todavía no agregas productos a esta compra.</p>`;
+  return state.cart.map((line) => `
+    <div class="balance">
+      <div><strong>${esc(line.name)}</strong><p class="hint">${line.quantity} · ${money(line.priceCents * line.quantity)}</p></div>
+      <button class="btn ghost small" type="button" data-action="remove-cart" data-id="${line.productId}">Quitar</button>
+    </div>`).join('');
+}
+
+function refreshBuyCart() {
+  const lines = document.getElementById('buy-lines');
+  const total = document.getElementById('buy-total');
+  const button = document.querySelector('[data-action="confirm-purchase"]');
+  if (lines) lines.innerHTML = cartLinesHtml();
+  if (total) total.textContent = money(state.cart.reduce((sum, line) => sum + line.priceCents * line.quantity, 0));
+  if (button) button.disabled = state.cart.length === 0;
+}
+
 function buyModal() {
-  const available = state.products.filter((product) => product.active && product.stock > 0);
-  const options = available.map((product) => `<option value="${product.id}">${esc(product.name)} · ${money(product.priceCents)} · quedan ${product.stock}</option>`).join('');
-  const lines = state.cart.length
-    ? state.cart.map((line) => `
-        <div class="balance">
-          <div><strong>${esc(line.name)}</strong><p class="hint">${line.quantity} · ${money(line.priceCents * line.quantity)}</p></div>
-          <button class="btn ghost small" type="button" data-action="remove-cart" data-id="${line.productId}">Quitar</button>
-        </div>`).join('')
-    : `<p class="hint">Todavía no agregas productos a esta compra.</p>`;
-  const total = state.cart.reduce((sum, line) => sum + line.priceCents * line.quantity, 0);
-  const picker = available.length
-    ? `<div class="cart-add">
-        <label class="field"><span>Producto</span><select id="buy-product">${options}</select></label>
-        <label class="field"><span>Cantidad a facturar</span><input id="buy-qty" type="number" min="1" max="500" value="1"></label>
-        <button class="btn ghost" type="button" data-action="add-cart">Agregar</button>
-      </div>`
-    : `<p class="lead">No hay productos con existencias. Cárgalos en Inventario.</p><a class="btn primary" href="/panel/inventario" data-link>Ir al inventario</a>`;
   return `
     <div class="modal-back" data-action="close-buy">
       <article class="modal card wide" data-stop>
         <p class="stub-kicker">${esc(state.currentTicket?.code || '')}</p>
         <h2 style="font-size:36px">Nueva compra</h2>
-        <p class="lead page-lead">Estas unidades se restan del inventario al registrar la compra. Luego eliges cuántas entregar.</p>
-        ${picker}
-        <div style="margin-top:12px">${lines}</div>
-        <div class="total-box"><span>Total</span><strong>${money(total)}</strong></div>
+        <p class="lead page-lead">Busca en el inventario y agrega lo que se va a facturar. Al registrar, se restan las existencias.</p>
+        <div class="cart-add">
+          <label class="field"><span>Buscar producto</span><input id="buy-search" type="search" placeholder="Escribe y aparecen los productos" autocomplete="off"></label>
+          <label class="field"><span>Cantidad</span><input id="buy-qty" type="number" min="1" max="500" value="1"></label>
+        </div>
+        <div id="buy-results" class="buy-results">${buyResultsHtml('')}</div>
+        <div id="buy-lines">${cartLinesHtml()}</div>
+        <div class="total-box"><span>Total</span><strong id="buy-total">${money(0)}</strong></div>
         <label class="field"><span>Método de pago</span><select id="pay-method">${paymentOptions('efectivo')}</select></label>
         <div class="row-actions">
-          <button class="btn primary" type="button" data-action="confirm-purchase" ${state.cart.length ? '' : 'disabled'}>Registrar compra</button>
+          <button class="btn primary" type="button" data-action="confirm-purchase" disabled>Registrar compra</button>
           <button class="btn ghost" type="button" data-action="close-buy">Cancelar</button>
         </div>
       </article>
@@ -1058,6 +1083,19 @@ function usersView() {
     </div>`;
 }
 
+function shareControls(screen, linked) {
+  const others = linked.filter((item) => item.id !== screen.id);
+  if (!others.length) return '';
+  return `<div class="share-row">
+    <select data-share-target="${screen.id}" aria-label="Compartir a otra pantalla">
+      <option value="">Compartir a otra pantalla</option>
+      ${others.map((item) => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}
+      ${others.length > 1 ? '<option value="all">Todas las demás</option>' : ''}
+    </select>
+    <button class="btn ghost small" type="button" data-action="share-screen" data-id="${screen.id}">Compartir</button>
+  </div>`;
+}
+
 function screensView() {
   const linked = state.screens.filter((screen) => screen.status === 'linked');
   const cards = state.screens.length ? state.screens.map((screen) => `
@@ -1068,6 +1106,7 @@ function screensView() {
       </div>
       <div class="row-actions">
         ${screen.status === 'pending' ? `<span class="pair-code-label">${esc(screen.code.slice(0, 3))} ${esc(screen.code.slice(3))}</span><input class="screen-name" data-screen-name="${screen.id}" placeholder="Nombre de esta pantalla" maxlength="40" aria-label="Nombre de esta pantalla"><button class="btn primary small" type="button" data-action="link-screen" data-id="${screen.id}">Vincular</button>` : `<button class="btn ghost small" type="button" data-action="clear-screen" data-id="${screen.id}">Quitar contenido</button>`}
+        ${screen.status === 'linked' && screen.content ? shareControls(screen, linked) : ''}
         <button class="btn danger small" type="button" data-action="delete-screen" data-id="${screen.id}">Quitar</button>
       </div>
     </article>`).join('') : `<div class="empty"><h3>No hay pantallas</h3><p class="lead">Abre la dirección de abajo en el televisor. El código aparecerá allí.</p></div>`;
@@ -1112,6 +1151,21 @@ function screensView() {
     </div>`;
 }
 
+function youtubeFrame(id, title) {
+  const origin = encodeURIComponent(location.origin);
+  return `<iframe title="${esc(title || 'Video')}" src="https://www.youtube.com/embed/${id}?autoplay=1&mute=0&enablejsapi=1&playsinline=1&rel=0&modestbranding=1&iv_load_policy=3&loop=1&playlist=${id}&origin=${origin}" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+}
+
+function kickYouTube(frame) {
+  const win = frame?.contentWindow;
+  if (!win) return;
+  const send = (func, args) => win.postMessage(JSON.stringify({ event: 'command', func, args }), 'https://www.youtube.com');
+  win.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), 'https://www.youtube.com');
+  send('playVideo', []);
+  send('unMute', []);
+  send('setVolume', [100]);
+}
+
 function paintScreen(screen) {
   const stage = document.getElementById('screen-stage');
   if (!stage) return;
@@ -1136,7 +1190,12 @@ function paintScreen(screen) {
     stage.innerHTML = `<video src="${esc(content.source)}" autoplay loop playsinline controls></video>`;
   } else {
     const id = encodeURIComponent(content.source);
-    stage.innerHTML = `<iframe title="${esc(content.title || 'Video')}" src="https://www.youtube-nocookie.com/embed/${id}?autoplay=1&mute=1&controls=1&rel=0&loop=1&playlist=${id}" allow="autoplay; fullscreen" allowfullscreen></iframe><button class="btn amber sound-btn" type="button" data-action="screen-sound" data-video="${id}">Activar sonido</button>`;
+    stage.innerHTML = youtubeFrame(id, content.title);
+    const frame = stage.querySelector('iframe');
+    frame.addEventListener('load', () => {
+      kickYouTube(frame);
+      setTimeout(() => kickYouTube(frame), 300);
+    });
   }
 }
 
@@ -1178,7 +1237,7 @@ async function renderScreen() {
       const stage = document.getElementById('screen-stage');
       if (stage && stage.dataset.signature == null) stage.innerHTML = `<p>${esc(error.message || 'Sin conexión con la tasca.')}</p>`;
     }
-    if (currentPath() === '/pantalla') screenTimer = setTimeout(tick, 3000);
+    if (currentPath() === '/pantalla') screenTimer = setTimeout(tick, 1000);
   };
   await tick();
 }
@@ -1598,23 +1657,36 @@ async function onClick(event) {
     return;
   }
   if (action === 'open-buy') {
+    event.preventDefault();
+    event.stopPropagation();
     if (!state.currentTicket || state.currentTicket.status === 'expired') return;
-    state.products = (await api('/api/products')).products;
-    state.cart = [];
-    document.querySelector('.modal-back')?.remove();
-    document.body.insertAdjacentHTML('beforeend', buyModal());
+    try {
+      state.products = (await api('/api/products')).products;
+      state.cart = [];
+      buyGuard = Date.now() + 600;
+      document.querySelector('.modal-back')?.remove();
+      document.body.insertAdjacentHTML('beforeend', buyModal());
+      document.getElementById('buy-search')?.focus();
+    } catch (error) {
+      toast(error.message, 'bad');
+    }
     return;
   }
   if (action === 'close-buy') {
+    if (control.classList.contains('modal-back') && Date.now() < buyGuard) return;
     state.cart = [];
     document.querySelector('.modal-back')?.remove();
     return;
   }
-  if (action === 'add-cart') {
-    const product = state.products.find((item) => item.id === Number(document.querySelector('#buy-product')?.value));
+  if (action === 'pick-product') {
+    const product = state.products.find((item) => item.id === Number(control.dataset.id));
     const quantity = Number(document.querySelector('#buy-qty')?.value);
-    if (!product || !Number.isInteger(quantity) || quantity < 1) {
-      toast('Elige un producto y una cantidad.', 'bad');
+    if (!product || product.stock < 1) {
+      toast('Ese producto no tiene existencias.', 'bad');
+      return;
+    }
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      toast('Indica una cantidad.', 'bad');
       return;
     }
     const current = state.cart.find((line) => line.productId === product.id)?.quantity || 0;
@@ -1624,14 +1696,12 @@ async function onClick(event) {
     }
     if (current) state.cart.find((line) => line.productId === product.id).quantity += quantity;
     else state.cart.push({ productId: product.id, name: product.name, priceCents: product.priceCents, quantity });
-    document.querySelector('.modal-back')?.remove();
-    document.body.insertAdjacentHTML('beforeend', buyModal());
+    refreshBuyCart();
     return;
   }
   if (action === 'remove-cart') {
     state.cart = state.cart.filter((line) => line.productId !== Number(control.dataset.id));
-    document.querySelector('.modal-back')?.remove();
-    document.body.insertAdjacentHTML('beforeend', buyModal());
+    refreshBuyCart();
     return;
   }
   if (action === 'confirm-purchase') {
@@ -1800,10 +1870,16 @@ async function onClick(event) {
     await render();
     return;
   }
-  if (action === 'screen-sound') {
-    const frame = document.querySelector('.screen-stage iframe');
-    if (frame) frame.src = frame.src.replace('mute=1', 'mute=0');
-    control.remove();
+  if (action === 'share-screen') {
+    const select = document.querySelector(`[data-share-target="${control.dataset.id}"]`);
+    const target = select?.value || '';
+    if (!target) {
+      toast('Elige la pantalla que va a recibir lo que se está viendo.', 'bad');
+      return;
+    }
+    state.screens = (await api(`/api/screens/${control.dataset.id}/share`, { method: 'POST', body: { target } })).screens;
+    toast('La pantalla ya está compartiendo.');
+    mount(shell(screensView()));
     return;
   }
   if (action === 'preset') {
@@ -1842,6 +1918,10 @@ document.addEventListener('submit', (event) => {
 document.addEventListener('input', (event) => {
   if (event.target.closest('#ticket-form')) updateTotal();
   if (event.target.closest('form[data-form="product"]')) updateProductProfit();
+  if (event.target.id === 'buy-search') {
+    const box = document.getElementById('buy-results');
+    if (box) box.innerHTML = buyResultsHtml(event.target.value);
+  }
 });
 document.addEventListener('change', (event) => {
   if (event.target.closest('#ticket-form')) updateTotal();

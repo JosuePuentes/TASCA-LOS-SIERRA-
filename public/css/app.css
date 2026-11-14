@@ -687,7 +687,23 @@ body:has(.shell.night) { background: #070712; color: #eef7ff; }
   pointer-events: auto !important;
   transform: none !important;
 }
-.shell.night > .main { display: block; width: 100%; min-height: 100dvh; }
+.buy-results { display: grid; gap: 8px; max-height: 240px; overflow: auto; margin: 4px 0 12px; }
+.buy-hit {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(57, 243, 255, 0.35);
+  background: #0c1020;
+  color: #eef7ff;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.buy-hit:disabled { opacity: 0.45; }
+.buy-hit span { color: #9eb0c8; }
+.share-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.share-row select { width: auto; min-width: 180px; }
 
 @media print {
   body.printing .sidebar,

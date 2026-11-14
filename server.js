@@ -668,7 +668,7 @@ function presentScreen(row) {
 
 const hosted = onVercel || Boolean(process.env.RENDER);
 const app = express();
-if (hosted) app.set('trust proxy', 1);
+if (hosted) app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieSession({
   name: 'tasca.session',
@@ -676,8 +676,16 @@ app.use(cookieSession({
   maxAge: 7 * 24 * 60 * 60 * 1000,
   httpOnly: true,
   sameSite: 'lax',
-  secure: hosted,
+  path: '/',
+  secure: false,
+  overwrite: true,
 }));
+app.use((req, res, next) => {
+  if (String(req.headers.cookie || '').includes('tasca.sid=')) {
+    res.append('Set-Cookie', 'tasca.sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax');
+  }
+  next();
+});
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();

@@ -47,7 +47,6 @@ let scanTimer = null;
 let screenTimer = null;
 let screenBoot = null;
 let buyGuard = 0;
-let screenPlayer = null;
 let youtubeSeconds = null;
 let screenReady = true;
 
@@ -1177,7 +1176,7 @@ function mediaOffset(content, duration) {
 function youtubeFrame(id, title, start) {
   const origin = encodeURIComponent(location.origin);
   const at = start > 0.5 ? `&start=${Math.floor(start)}` : '';
-  return `<iframe id="screen-youtube" title="${esc(title || 'Video')}" src="https://www.youtube.com/embed/${id}?autoplay=1&mute=0&enablejsapi=1&playsinline=1&rel=0&modestbranding=1&iv_load_policy=3&loop=1&playlist=${id}&origin=${origin}${at}" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+  return `<iframe id="screen-youtube" title="${esc(title || 'Video')}" src="https://www.youtube.com/embed/${id}?autoplay=1&mute=0&enablejsapi=1&playsinline=1&rel=0&modestbranding=1&iv_load_policy=3&controls=0&disablekb=1&fs=0&loop=1&playlist=${id}&origin=${origin}${at}" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
 }
 
 function kickYouTube(frame, seconds = 0) {
@@ -1185,29 +1184,42 @@ function kickYouTube(frame, seconds = 0) {
   if (!win) return;
   const send = (func, args) => win.postMessage(JSON.stringify({ event: 'command', func, args, id: 1, channel: 'widget' }), 'https://www.youtube.com');
   win.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), 'https://www.youtube.com');
-  if (seconds > 0.5) send('seekTo', [seconds, true]);
-  send('playVideo', []);
   send('unMute', []);
   send('setVolume', [100]);
-  send('getCurrentTime', []);
+  send('playVideo', []);
+  if (seconds > 0.5) send('seekTo', [seconds, true]);
 }
 
-function loadYouTubeApi() {
-  if (window.YT?.Player) return Promise.resolve();
-  if (!loadYouTubeApi.promise) {
-    loadYouTubeApi.promise = new Promise((resolve) => {
-      const previous = window.onYouTubeIframeAPIReady;
-      window.onYouTubeIframeAPIReady = () => {
-        if (typeof previous === 'function') previous();
-        resolve();
-      };
-      const script = document.createElement('script');
-      script.src = 'https://www.youtube.com/iframe_api';
-      document.head.appendChild(script);
-      setTimeout(resolve, 4000);
-    });
+function playOutLoud(video) {
+  if (!video) return;
+  const at = video.currentTime || 0;
+  video.volume = 1;
+  video.muted = false;
+  video.defaultMuted = false;
+  const restore = () => {
+    if (at > 0.3 && Math.abs((video.currentTime || 0) - at) > 1.2) video.currentTime = at;
+  };
+  let pending = null;
+  try { pending = video.play(); } catch { pending = null; }
+  if (!pending || typeof pending.then !== 'function') {
+    restore();
+    return;
   }
-  return loadYouTubeApi.promise;
+  pending.catch(() => {
+    video.muted = true;
+    const again = video.play();
+    if (!again || typeof again.then !== 'function') return;
+    again.then(() => {
+      video.muted = false;
+      video.volume = 1;
+      const loud = video.play();
+      if (loud && typeof loud.catch === 'function') loud.catch(() => {});
+    }).catch(() => {
+      video.muted = true;
+      const quiet = video.play();
+      if (quiet && typeof quiet.catch === 'function') quiet.catch(() => {});
+    });
+  }).finally(restore);
 }
 
 function seekPlaying(content) {
@@ -1216,22 +1228,14 @@ function seekPlaying(content) {
     const go = () => {
       const time = mediaOffset(content, video.duration);
       if (Math.abs(video.currentTime - time) > 0.8) video.currentTime = time;
-      video.play().catch(() => {});
+      playOutLoud(video);
     };
     if (video.readyState >= 1) go();
     else video.addEventListener('loadedmetadata', go, { once: true });
     return;
   }
-  const time = mediaOffset(content);
   const frame = document.querySelector('#screen-stage iframe');
-  if (frame) {
-    kickYouTube(frame, time);
-    setTimeout(() => kickYouTube(frame, time), 500);
-  }
-  if (screenPlayer && typeof screenPlayer.seekTo === 'function') {
-    screenPlayer.seekTo(time, true);
-    screenPlayer.playVideo?.();
-  }
+  if (frame) kickYouTube(frame, mediaOffset(content));
 }
 
 function askYouTubeTime(frame) {
@@ -1250,12 +1254,6 @@ function readPlaybackSeconds() {
   const frame = document.querySelector('#screen-stage iframe');
   if (!frame) return null;
   askYouTubeTime(frame);
-  if (screenPlayer && typeof screenPlayer.getCurrentTime === 'function') {
-    try {
-      const time = Number(screenPlayer.getCurrentTime());
-      if (Number.isFinite(time) && time >= 0) return Math.round(time * 10) / 10;
-    } catch { /* el reproductor todavía no responde */ }
-  }
   if (typeof youtubeSeconds === 'number') return Math.round(youtubeSeconds * 10) / 10;
   return null;
 }
@@ -1274,7 +1272,7 @@ function paintScreen(screen) {
     seekPlaying(content);
     return;
   }
-  screenPlayer = null;
+  screenReady = true;
   youtubeSeconds = null;
   if (screen.status !== 'linked') {
     stage.className = 'screen-stage wait';
@@ -1292,59 +1290,52 @@ function paintScreen(screen) {
     stage.innerHTML = `<img alt="${esc(content.title || 'Imagen')}" src="${esc(content.source)}">`;
   } else if (content.kind === 'video') {
     const offset = mediaOffset(content);
-    screenReady = offset < 0.3;
+    screenReady = true;
     const src = offset > 0.5 ? `${content.source}#t=${offset.toFixed(1)}` : content.source;
-    stage.innerHTML = `<video src="${esc(src)}" autoplay loop playsinline controls preload="auto"></video>`;
+    stage.innerHTML = `<video src="${esc(src)}" autoplay loop playsinline preload="auto"></video>`;
     const video = stage.querySelector('video');
+    let placed = offset < 0.3;
     const place = () => {
+      if (placed || video.readyState < 1) return;
+      placed = true;
       const time = mediaOffset(content, video.duration);
-      if (time > 0.25 && Math.abs(video.currentTime - time) > 0.35) video.currentTime = time;
+      if (time > 0.3) video.currentTime = time;
     };
     video.addEventListener('loadedmetadata', place);
-    video.addEventListener('seeked', () => { screenReady = true; });
-    video.addEventListener('canplay', () => {
-      place();
-      screenReady = true;
-    });
-    video.play().catch(() => {});
     video.addEventListener('error', () => {
+      video.dataset.broken = '1';
       stage.className = 'screen-stage wait';
       stage.innerHTML = `<div><p class="eyebrow">Video</p><h1>No se pudo reproducir</h1><p>El televisor no abre este archivo. Usa un MP4.</p></div>`;
     });
+    playOutLoud(video);
   } else {
     const offset = mediaOffset(content);
-    screenReady = offset < 0.3;
+    screenReady = true;
     const id = encodeURIComponent(content.source);
     stage.innerHTML = youtubeFrame(id, content.title, offset);
     const frame = stage.querySelector('iframe');
-    const arm = () => kickYouTube(frame, offset);
-    frame.addEventListener('load', () => {
-      arm();
-      setTimeout(arm, 400);
-      if (offset > 0.3) setTimeout(() => { screenReady = true; }, 1200);
-      else screenReady = true;
-    });
-    loadYouTubeApi().then(() => {
-      if (!frame.isConnected || !window.YT?.Player) return;
-      screenPlayer = new window.YT.Player(frame, {
-        events: {
-          onReady: (event) => {
-            if (offset > 0.3) event.target.seekTo(offset, true);
-            event.target.unMute();
-            event.target.setVolume(100);
-            event.target.playVideo();
-            screenReady = true;
-          },
-        },
-      });
-    });
+    frame.addEventListener('load', () => kickYouTube(frame, offset));
   }
+}
+
+function keepScreenPlaying() {
+  const video = document.querySelector('#screen-stage video');
+  if (!video || video.dataset.broken === '1') return;
+  if (!video.paused && !video.muted && video.volume > 0) return;
+  const tries = Number(video.dataset.soundTries || 0);
+  if (!video.paused && video.muted && tries >= 2) return;
+  if (video.dataset.holding === '1') return;
+  video.dataset.holding = '1';
+  video.dataset.soundTries = String(tries + 1);
+  playOutLoud(video);
+  setTimeout(() => {
+    if (video.isConnected) video.dataset.holding = '';
+  }, 2000);
 }
 
 function stopScreen() {
   if (screenTimer) clearTimeout(screenTimer);
   screenTimer = null;
-  screenPlayer = null;
 }
 
 async function renderScreen() {
@@ -1376,6 +1367,7 @@ async function renderScreen() {
         soft: true,
       });
       paintScreen(data.screen);
+      keepScreenPlaying();
     } catch (error) {
       if (error.status === 404) {
         localStorage.removeItem('tasca-screen-token');
@@ -2142,7 +2134,7 @@ document.addEventListener('keydown', (event) => {
 window.addEventListener('popstate', () => render());
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => {});
 }
 
 api('/api/me', { soft: true })

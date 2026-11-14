@@ -693,6 +693,10 @@ app.use((req, res, next) => {
   }
   next();
 });
+app.use((req, res, next) => {
+  res.set('Permissions-Policy', 'autoplay=*');
+  next();
+});
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();

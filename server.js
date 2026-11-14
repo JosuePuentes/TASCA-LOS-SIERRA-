@@ -151,6 +151,9 @@ if (!columnNames('products').includes('cost_cents')) {
 if (!columnNames('tickets').includes('alias')) db.exec('ALTER TABLE tickets ADD COLUMN alias TEXT');
 if (!columnNames('tickets').includes('payment_method')) db.exec('ALTER TABLE tickets ADD COLUMN payment_method TEXT');
 if (!columnNames('tickets').includes('receipt_file')) db.exec('ALTER TABLE tickets ADD COLUMN receipt_file TEXT');
+if (!columnNames('screens').includes('play_seconds')) db.exec('ALTER TABLE screens ADD COLUMN play_seconds REAL');
+if (!columnNames('screens').includes('play_at')) db.exec('ALTER TABLE screens ADD COLUMN play_at TEXT');
+if (!columnNames('screens').includes('play_mark')) db.exec('ALTER TABLE screens ADD COLUMN play_mark TEXT');
 
 let seededAdmin = false;
 const userCount = num(db.prepare('SELECT COUNT(*) AS n FROM users').get().n);
@@ -649,10 +652,14 @@ function pairingCode() {
 
 function presentScreen(row) {
   const seen = row.last_seen ? Date.now() - new Date(row.last_seen).getTime() : Infinity;
+  const position = row.play_seconds == null || row.play_seconds === '' ? null : Number(row.play_seconds);
   const content = row.content_kind ? {
     kind: row.content_kind,
     title: row.content_title || '',
     source: row.content_kind === 'youtube' ? row.content_source : `/media/${row.content_source}`,
+    mark: row.play_mark || '',
+    position: Number.isFinite(position) ? position : null,
+    positionAt: row.play_at || null,
   } : null;
   return {
     id: num(row.id),
@@ -1332,12 +1339,30 @@ app.post('/api/public/screens', (req, res) => {
   res.status(201).json({ token, screen: presentScreen(db.prepare('SELECT * FROM screens WHERE id = ?').get(num(info.lastInsertRowid))) });
 });
 
+function touchScreen(screen, seconds) {
+  const now = new Date().toISOString();
+  const playing = screen.content_kind === 'video' || screen.content_kind === 'youtube';
+  const value = typeof seconds === 'number' ? seconds : NaN;
+  if (playing && Number.isFinite(value) && value >= 0 && value <= 100000) {
+    db.prepare('UPDATE screens SET last_seen = ?, play_seconds = ?, play_at = ? WHERE id = ?').run(now, value, now, screen.id);
+    return { ...screen, last_seen: now, play_seconds: value, play_at: now };
+  }
+  db.prepare('UPDATE screens SET last_seen = ? WHERE id = ?').run(now, screen.id);
+  return { ...screen, last_seen: now };
+}
+
 app.get('/api/public/screens/:token', (req, res) => {
   const screen = db.prepare('SELECT * FROM screens WHERE token = ?').get(String(req.params.token || ''));
   if (!screen) return res.status(404).json({ error: 'Esta pantalla ya no está vinculada.' });
-  const now = new Date().toISOString();
-  db.prepare('UPDATE screens SET last_seen = ? WHERE id = ?').run(now, screen.id);
-  res.json({ screen: presentScreen({ ...screen, last_seen: now }) });
+  res.json({ screen: presentScreen(touchScreen(screen, null)) });
+});
+
+app.post('/api/public/screens/:token/tick', (req, res) => {
+  const screen = db.prepare('SELECT * FROM screens WHERE token = ?').get(String(req.params.token || ''));
+  if (!screen) return res.status(404).json({ error: 'Esta pantalla ya no está vinculada.' });
+  const raw = req.body?.seconds;
+  const seconds = typeof raw === 'number' ? raw : NaN;
+  res.json({ screen: presentScreen(touchScreen(screen, seconds)) });
 });
 
 app.get('/api/screens', requireAuth, (req, res) => {
@@ -1380,7 +1405,7 @@ app.delete('/api/screens/:id', requireAuth, (req, res) => {
 app.post('/api/screens/:id/clear', requireAuth, (req, res) => {
   const screen = db.prepare('SELECT * FROM screens WHERE id = ?').get(Number(req.params.id));
   if (!screen) return res.status(404).json({ error: 'No se encontró la pantalla.' });
-  db.prepare(`UPDATE screens SET content_kind = NULL, content_source = NULL, content_title = NULL WHERE id = ?`).run(screen.id);
+  db.prepare(`UPDATE screens SET content_kind = NULL, content_source = NULL, content_title = NULL, play_seconds = NULL, play_at = NULL, play_mark = NULL WHERE id = ?`).run(screen.id);
   res.json({ screen: presentScreen(db.prepare('SELECT * FROM screens WHERE id = ?').get(screen.id)) });
 });
 
@@ -1393,8 +1418,11 @@ app.post('/api/screens/:id/share', requireAuth, (req, res) => {
     ? db.prepare(`SELECT * FROM screens WHERE status = 'linked' AND id != ?`).all(screen.id)
     : db.prepare(`SELECT * FROM screens WHERE id = ? AND status = 'linked' AND id != ?`).all(Number(target), screen.id);
   if (!others.length) return res.status(400).json({ error: 'Elige otra pantalla vinculada.' });
-  const update = db.prepare(`UPDATE screens SET content_kind = ?, content_source = ?, content_title = ? WHERE id = ?`);
-  for (const other of others) update.run(screen.content_kind, screen.content_source, screen.content_title, other.id);
+  const mark = crypto.randomBytes(8).toString('hex');
+  const update = db.prepare(`UPDATE screens SET content_kind = ?, content_source = ?, content_title = ?, play_seconds = ?, play_at = ?, play_mark = ? WHERE id = ?`);
+  for (const other of others) {
+    update.run(screen.content_kind, screen.content_source, screen.content_title, screen.play_seconds, screen.play_at, mark, other.id);
+  }
   res.json({ screens: db.prepare('SELECT * FROM screens ORDER BY status DESC, created_at DESC').all().map(presentScreen) });
 });
 
@@ -1435,8 +1463,10 @@ app.post('/api/screens/play', requireAuth, uploadMedia, (req, res) => {
     if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: 'Elige una pantalla vinculada, o vincula una antes de reproducir.' });
   }
-  const update = db.prepare(`UPDATE screens SET content_kind = ?, content_source = ?, content_title = ? WHERE id = ?`);
-  for (const screen of screens) update.run(kind, source, title, screen.id);
+  const mark = crypto.randomBytes(8).toString('hex');
+  const started = new Date().toISOString();
+  const update = db.prepare(`UPDATE screens SET content_kind = ?, content_source = ?, content_title = ?, play_seconds = 0, play_at = ?, play_mark = ? WHERE id = ?`);
+  for (const screen of screens) update.run(kind, source, title, started, mark, screen.id);
   res.json({ screens: db.prepare('SELECT * FROM screens ORDER BY status DESC, created_at DESC').all().map(presentScreen) });
 });
 

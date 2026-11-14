@@ -47,6 +47,19 @@ let scanTimer = null;
 let screenTimer = null;
 let screenBoot = null;
 let buyGuard = 0;
+let screenPlayer = null;
+let youtubeSeconds = null;
+let screenReady = true;
+
+window.addEventListener('message', (event) => {
+  if (!String(event.origin || '').includes('youtube.com')) return;
+  let data = event.data;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return; }
+  }
+  const time = data?.info?.currentTime ?? data?.info?.current_time;
+  if (typeof time === 'number' && Number.isFinite(time)) youtubeSeconds = time;
+});
 
 const titles = {
   '/': 'Tasca Los Sierra',
@@ -1151,56 +1164,179 @@ function screensView() {
     </div>`;
 }
 
-function youtubeFrame(id, title) {
-  const origin = encodeURIComponent(location.origin);
-  return `<iframe title="${esc(title || 'Video')}" src="https://www.youtube.com/embed/${id}?autoplay=1&mute=0&enablejsapi=1&playsinline=1&rel=0&modestbranding=1&iv_load_policy=3&loop=1&playlist=${id}&origin=${origin}" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+function mediaOffset(content, duration) {
+  const base = Number(content?.position);
+  if (!Number.isFinite(base) || base < 0) return 0;
+  const at = Date.parse(content.positionAt || '');
+  const elapsed = Number.isFinite(at) ? Math.max(0, (Date.now() - at) / 1000) : 0;
+  let time = base + elapsed;
+  if (Number.isFinite(duration) && duration > 0.5) time %= duration;
+  return time;
 }
 
-function kickYouTube(frame) {
+function youtubeFrame(id, title, start) {
+  const origin = encodeURIComponent(location.origin);
+  const at = start > 0.5 ? `&start=${Math.floor(start)}` : '';
+  return `<iframe id="screen-youtube" title="${esc(title || 'Video')}" src="https://www.youtube.com/embed/${id}?autoplay=1&mute=0&enablejsapi=1&playsinline=1&rel=0&modestbranding=1&iv_load_policy=3&loop=1&playlist=${id}&origin=${origin}${at}" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+}
+
+function kickYouTube(frame, seconds = 0) {
   const win = frame?.contentWindow;
   if (!win) return;
-  const send = (func, args) => win.postMessage(JSON.stringify({ event: 'command', func, args }), 'https://www.youtube.com');
+  const send = (func, args) => win.postMessage(JSON.stringify({ event: 'command', func, args, id: 1, channel: 'widget' }), 'https://www.youtube.com');
   win.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), 'https://www.youtube.com');
+  if (seconds > 0.5) send('seekTo', [seconds, true]);
   send('playVideo', []);
   send('unMute', []);
   send('setVolume', [100]);
+  send('getCurrentTime', []);
+}
+
+function loadYouTubeApi() {
+  if (window.YT?.Player) return Promise.resolve();
+  if (!loadYouTubeApi.promise) {
+    loadYouTubeApi.promise = new Promise((resolve) => {
+      const previous = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        if (typeof previous === 'function') previous();
+        resolve();
+      };
+      const script = document.createElement('script');
+      script.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(script);
+      setTimeout(resolve, 4000);
+    });
+  }
+  return loadYouTubeApi.promise;
+}
+
+function seekPlaying(content) {
+  const video = document.querySelector('#screen-stage video');
+  if (video) {
+    const go = () => {
+      const time = mediaOffset(content, video.duration);
+      if (Math.abs(video.currentTime - time) > 0.8) video.currentTime = time;
+      video.play().catch(() => {});
+    };
+    if (video.readyState >= 1) go();
+    else video.addEventListener('loadedmetadata', go, { once: true });
+    return;
+  }
+  const time = mediaOffset(content);
+  const frame = document.querySelector('#screen-stage iframe');
+  if (frame) {
+    kickYouTube(frame, time);
+    setTimeout(() => kickYouTube(frame, time), 500);
+  }
+  if (screenPlayer && typeof screenPlayer.seekTo === 'function') {
+    screenPlayer.seekTo(time, true);
+    screenPlayer.playVideo?.();
+  }
+}
+
+function askYouTubeTime(frame) {
+  const win = frame?.contentWindow;
+  if (!win) return;
+  win.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), 'https://www.youtube.com');
+  win.postMessage(JSON.stringify({ event: 'command', func: 'getCurrentTime', args: [], id: 1, channel: 'widget' }), 'https://www.youtube.com');
+}
+
+function readPlaybackSeconds() {
+  if (!screenReady) return null;
+  const video = document.querySelector('#screen-stage video');
+  if (video && Number.isFinite(video.currentTime) && video.readyState >= 1) {
+    return Math.round(video.currentTime * 10) / 10;
+  }
+  const frame = document.querySelector('#screen-stage iframe');
+  if (!frame) return null;
+  askYouTubeTime(frame);
+  if (screenPlayer && typeof screenPlayer.getCurrentTime === 'function') {
+    try {
+      const time = Number(screenPlayer.getCurrentTime());
+      if (Number.isFinite(time) && time >= 0) return Math.round(time * 10) / 10;
+    } catch { /* el reproductor todavía no responde */ }
+  }
+  if (typeof youtubeSeconds === 'number') return Math.round(youtubeSeconds * 10) / 10;
+  return null;
 }
 
 function paintScreen(screen) {
   const stage = document.getElementById('screen-stage');
   if (!stage) return;
-  const signature = `${screen.status}|${screen.name}|${JSON.stringify(screen.content || null)}`;
-  if (stage.dataset.signature === signature) return;
-  stage.dataset.signature = signature;
+  const content = screen.content;
+  const identity = `${screen.status}|${screen.name}|${content?.kind || ''}|${content?.source || ''}`;
+  const mark = content?.mark || '';
+  if (stage.dataset.identity === identity && stage.dataset.mark === mark) return;
+  const sameMedia = stage.dataset.identity === identity && (content?.kind === 'video' || content?.kind === 'youtube');
+  stage.dataset.identity = identity;
+  stage.dataset.mark = mark;
+  if (sameMedia) {
+    seekPlaying(content);
+    return;
+  }
+  screenPlayer = null;
+  youtubeSeconds = null;
   if (screen.status !== 'linked') {
     stage.className = 'screen-stage wait';
     stage.innerHTML = `<div><p class="eyebrow">Tasca Los Sierra</p><p class="pair-code">${esc(screen.code.slice(0, 3))} ${esc(screen.code.slice(3))}</p><p>En el panel, entra a Pantallas y escribe este código en Vincular pantalla.</p></div>`;
     return;
   }
-  if (!screen.content) {
+  if (!content) {
     stage.className = 'screen-stage wait';
     stage.innerHTML = `<div><p class="eyebrow">Pantalla vinculada</p><h1>${esc(screen.name)}</h1><p>Esperando contenido.</p></div>`;
     return;
   }
   stage.className = 'screen-stage playing';
-  const content = screen.content;
   if (content.kind === 'image') {
+    screenReady = true;
     stage.innerHTML = `<img alt="${esc(content.title || 'Imagen')}" src="${esc(content.source)}">`;
   } else if (content.kind === 'video') {
-    stage.innerHTML = `<video src="${esc(content.source)}" autoplay loop playsinline controls preload="auto"></video>`;
+    const offset = mediaOffset(content);
+    screenReady = offset < 0.3;
+    const src = offset > 0.5 ? `${content.source}#t=${offset.toFixed(1)}` : content.source;
+    stage.innerHTML = `<video src="${esc(src)}" autoplay loop playsinline controls preload="auto"></video>`;
     const video = stage.querySelector('video');
+    const place = () => {
+      const time = mediaOffset(content, video.duration);
+      if (time > 0.25 && Math.abs(video.currentTime - time) > 0.35) video.currentTime = time;
+    };
+    video.addEventListener('loadedmetadata', place);
+    video.addEventListener('seeked', () => { screenReady = true; });
+    video.addEventListener('canplay', () => {
+      place();
+      screenReady = true;
+    });
     video.play().catch(() => {});
     video.addEventListener('error', () => {
       stage.className = 'screen-stage wait';
       stage.innerHTML = `<div><p class="eyebrow">Video</p><h1>No se pudo reproducir</h1><p>El televisor no abre este archivo. Usa un MP4.</p></div>`;
     });
   } else {
+    const offset = mediaOffset(content);
+    screenReady = offset < 0.3;
     const id = encodeURIComponent(content.source);
-    stage.innerHTML = youtubeFrame(id, content.title);
+    stage.innerHTML = youtubeFrame(id, content.title, offset);
     const frame = stage.querySelector('iframe');
+    const arm = () => kickYouTube(frame, offset);
     frame.addEventListener('load', () => {
-      kickYouTube(frame);
-      setTimeout(() => kickYouTube(frame), 300);
+      arm();
+      setTimeout(arm, 400);
+      if (offset > 0.3) setTimeout(() => { screenReady = true; }, 1200);
+      else screenReady = true;
+    });
+    loadYouTubeApi().then(() => {
+      if (!frame.isConnected || !window.YT?.Player) return;
+      screenPlayer = new window.YT.Player(frame, {
+        events: {
+          onReady: (event) => {
+            if (offset > 0.3) event.target.seekTo(offset, true);
+            event.target.unMute();
+            event.target.setVolume(100);
+            event.target.playVideo();
+            screenReady = true;
+          },
+        },
+      });
     });
   }
 }
@@ -1208,6 +1344,7 @@ function paintScreen(screen) {
 function stopScreen() {
   if (screenTimer) clearTimeout(screenTimer);
   screenTimer = null;
+  screenPlayer = null;
 }
 
 async function renderScreen() {
@@ -1233,7 +1370,11 @@ async function renderScreen() {
         }
         token = await screenBoot;
       }
-      const data = await api(`/api/public/screens/${token}`, { soft: true });
+      const data = await api(`/api/public/screens/${token}/tick`, {
+        method: 'POST',
+        body: { seconds: readPlaybackSeconds() },
+        soft: true,
+      });
       paintScreen(data.screen);
     } catch (error) {
       if (error.status === 404) {
@@ -1241,7 +1382,7 @@ async function renderScreen() {
         token = '';
       }
       const stage = document.getElementById('screen-stage');
-      if (stage && stage.dataset.signature == null) stage.innerHTML = `<p>${esc(error.message || 'Sin conexión con la tasca.')}</p>`;
+      if (stage && stage.dataset.identity == null) stage.innerHTML = `<p>${esc(error.message || 'Sin conexión con la tasca.')}</p>`;
     }
     if (currentPath() === '/pantalla') screenTimer = setTimeout(tick, 1000);
   };
@@ -1900,7 +2041,7 @@ async function onClick(event) {
       return;
     }
     state.screens = (await api(`/api/screens/${control.dataset.id}/share`, { method: 'POST', body: { target } })).screens;
-    toast('La pantalla ya está compartiendo.');
+    toast('Compartido. Si es un video, el otro televisor sigue en el mismo segundo.');
     mount(shell(screensView()));
     return;
   }

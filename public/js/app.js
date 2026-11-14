@@ -6,7 +6,7 @@ const state = {
   dash: null,
   sales: null,
   salesError: '',
-  salesQuery: { preset: 'day', from: '', to: '', q: '' },
+  salesQuery: { preset: 'day', from: '', to: '', q: '', kind: 'tickets' },
   detail: null,
   reads: [],
   products: [],
@@ -991,6 +991,7 @@ function paintVisor(ticket, note = '') {
 
 function salesView() {
   const sales = state.sales;
+  const kind = state.salesQuery.kind === 'products' ? 'products' : 'tickets';
   const presets = [
     ['day', 'Hoy'],
     ['week', 'Esta semana'],
@@ -999,37 +1000,87 @@ function salesView() {
     ['custom', 'Por fecha'],
   ];
   const preset = state.salesQuery.preset;
-  const chart = sales && sales.totals.tickets
-    ? `<section class="card"><h3>${sales.grain === 'hour' ? 'Entradas por hora' : sales.grain === 'month' ? 'Entradas por mes' : 'Entradas por día'}</h3><div class="bars">${chartBars(sales.series)}</div></section>`
-    : '';
-  const body = !sales
-    ? `<div class="empty"><h3>No se pudieron cargar las ventas</h3><p class="lead">${esc(state.salesError || '')}</p></div>`
-    : sales.totals.tickets
-      ? `<div class="grid-stats">
-          <article class="stat"><p class="stat-label">Entradas vendidas</p><p class="stat-value">${sales.totals.tickets}</p></article>
-          <article class="stat"><p class="stat-label">Códigos QR</p><p class="stat-value">${sales.totals.qrs}</p></article>
-          <article class="stat"><p class="stat-label">Ingresos</p><p class="stat-value">${money(sales.totals.revenueCents)}</p></article>
-          <article class="stat"><p class="stat-label">Periodo</p><p class="stat-value" style="font-size:22px">${esc(sales.label)}</p></article>
-        </div>
-        ${chart}
-        <section class="card" style="margin-top:16px"><h3>Entradas del periodo</h3><p class="hint" style="margin:6px 0 12px">Una fila con varias entradas es un solo QR de grupo.</p>${ticketRows(sales.rows)}</section>`
-      : `<div class="empty"><h3>No hay entradas en este periodo</h3><p class="lead">${esc(sales.label)}. Prueba otra fecha o emite entradas nuevas.</p><a class="btn primary" href="/panel/entradas" data-link style="margin-top:14px">Emitir entradas</a></div>`;
+  const kinds = [['tickets', 'Entradas'], ['products', 'Productos']];
   return `
     <h2>Ventas</h2>
-    <p class="lead page-lead">Revisa lo vendido hoy, esta semana, este mes, este año, o busca un rango de fechas.</p>
+    <p class="lead page-lead">Elige si quieres ver las entradas o las ventas de productos, y el periodo que te interesa.</p>
     <form id="sales-form" class="card no-print" data-form="sales" style="margin-bottom:16px">
+      <div class="seg">
+        ${kinds.map(([value, label]) => `<button type="button" class="${kind === value ? 'active' : ''}" data-action="sales-kind" data-kind="${value}">${label}</button>`).join('')}
+      </div>
       <div class="seg">
         ${presets.map(([value, label]) => `<button type="button" class="${preset === value ? 'active' : ''}" data-action="preset" data-preset="${value}">${label}</button>`).join('')}
       </div>
       <div class="filters">
         <label class="field"><span>Desde</span><input name="from" type="date" value="${esc(state.salesQuery.from)}"></label>
         <label class="field"><span>Hasta</span><input name="to" type="date" value="${esc(state.salesQuery.to)}"></label>
-        <label class="field"><span>Evento</span><input name="q" value="${esc(state.salesQuery.q)}" placeholder="Buscar por nombre"></label>
+        <label class="field"><span>${kind === 'products' ? 'Producto' : 'Evento'}</span><input name="q" value="${esc(state.salesQuery.q)}" placeholder="${kind === 'products' ? 'Buscar por producto' : 'Buscar por nombre'}"></label>
         <button class="btn primary" type="submit">Buscar</button>
       </div>
       <p class="form-error" ${state.salesError ? '' : 'hidden'} style="margin-top:10px">${esc(state.salesError)}</p>
     </form>
-    ${body}`;
+    ${kind === 'products' ? productSalesBody(sales) : ticketSalesBody(sales)}`;
+}
+
+function ticketSalesBody(sales) {
+  if (!sales) return `<div class="empty"><h3>No se pudieron cargar las ventas</h3><p class="lead">${esc(state.salesError || '')}</p></div>`;
+  if (!sales.totals.tickets) {
+    return `<div class="empty"><h3>No hay entradas en este periodo</h3><p class="lead">${esc(sales.label)}. Prueba otra fecha o emite entradas nuevas.</p><a class="btn primary" href="/panel/entradas" data-link style="margin-top:14px">Emitir entradas</a></div>`;
+  }
+  const chartTitle = sales.grain === 'hour' ? 'Entradas por hora' : sales.grain === 'month' ? 'Entradas por mes' : 'Entradas por día';
+  return `
+    <div class="grid-stats">
+      <article class="stat"><p class="stat-label">Entradas vendidas</p><p class="stat-value">${sales.totals.tickets}</p></article>
+      <article class="stat"><p class="stat-label">Códigos QR</p><p class="stat-value">${sales.totals.qrs}</p></article>
+      <article class="stat"><p class="stat-label">Ingresos</p><p class="stat-value">${money(sales.totals.revenueCents)}</p></article>
+      <article class="stat"><p class="stat-label">Periodo</p><p class="stat-value" style="font-size:22px">${esc(sales.label)}</p></article>
+    </div>
+    <section class="card"><h3>${chartTitle}</h3><div class="bars">${chartBars(sales.series)}</div></section>
+    <section class="card" style="margin-top:16px"><h3>Entradas del periodo</h3><p class="hint" style="margin:6px 0 12px">Una fila con varias entradas es un solo QR de grupo.</p>${ticketRows(sales.rows)}</section>`;
+}
+
+function productSalesBody(sales) {
+  if (!sales) return `<div class="empty"><h3>No se pudieron cargar las ventas</h3><p class="lead">${esc(state.salesError || '')}</p></div>`;
+  if (!sales.totals.units) {
+    const lead = sales.query
+      ? `Ningún producto coincide con «${esc(sales.query)}» en ${esc(sales.label)}.`
+      : `${esc(sales.label)}. Cuando factures productos en un QR, el total de cada uno aparece aquí.`;
+    return `<div class="empty"><h3>No hay ventas de productos en este periodo</h3><p class="lead">${lead}</p></div>`;
+  }
+  const chartTitle = sales.grain === 'hour' ? 'Unidades por hora' : sales.grain === 'month' ? 'Unidades por mes' : 'Unidades por día';
+  const groups = (sales.products || []).map((product) => `
+    <article class="event-row">
+      <div>
+        <h3>${esc(product.name)}</h3>
+        <p class="price-line">${product.units.toLocaleString('es-ES')} ${product.units === 1 ? 'unidad' : 'unidades'} · ${product.sales.toLocaleString('es-ES')} ${product.sales === 1 ? 'venta' : 'ventas'}</p>
+      </div>
+      <strong>${money(product.revenueCents)}</strong>
+    </article>`).join('');
+  const details = `
+    <div class="table-wrap"><table>
+      <thead><tr><th>Fecha</th><th>Producto</th><th>Cantidad</th><th>Total</th><th>Entrada</th><th>Pago</th></tr></thead>
+      <tbody>
+        ${(sales.rows || []).map((row) => `
+          <tr>
+            <td>${formatDateTime(row.createdAt)}</td>
+            <td>${esc(row.productName)}</td>
+            <td>${row.quantity.toLocaleString('es-ES')}</td>
+            <td>${money(row.totalCents)}</td>
+            <td>${esc(row.alias || row.eventName)} · <span class="code">${esc(row.ticketCode)}</span></td>
+            <td>${esc(paymentLabel(row.paymentMethod))}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table></div>`;
+  return `
+    <div class="grid-stats">
+      <article class="stat"><p class="stat-label">Unidades vendidas</p><p class="stat-value">${sales.totals.units.toLocaleString('es-ES')}</p></article>
+      <article class="stat"><p class="stat-label">Productos</p><p class="stat-value">${sales.totals.products}</p></article>
+      <article class="stat"><p class="stat-label">Ingresos</p><p class="stat-value">${money(sales.totals.revenueCents)}</p></article>
+      <article class="stat"><p class="stat-label">Periodo</p><p class="stat-value" style="font-size:22px">${esc(sales.label)}</p></article>
+    </div>
+    <section class="card"><h3>${chartTitle}</h3><div class="bars">${chartBars(sales.series)}</div></section>
+    <section class="card" style="margin-top:16px"><h3>Por producto</h3><p class="hint" style="margin:6px 0 12px">Cada fila suma todas las ventas de ese producto en el periodo. Los combos se cuentan con su propio precio.</p><div class="event-list">${groups}</div></section>
+    <section class="card" style="margin-top:16px"><h3>Detalle</h3><div style="height:12px"></div>${details}</section>`;
 }
 
 function chartBars(series) {
@@ -1207,6 +1258,7 @@ function salesParams() {
   if (state.salesQuery.from) query.set('from', state.salesQuery.from);
   if (state.salesQuery.to) query.set('to', state.salesQuery.to);
   if (state.salesQuery.q) query.set('q', state.salesQuery.q);
+  if (state.salesQuery.kind === 'products') query.set('kind', 'products');
   return query;
 }
 
@@ -1759,6 +1811,7 @@ async function render() {
       state.salesQuery.preset = state.sales.preset;
       state.salesQuery.from = state.sales.from;
       state.salesQuery.to = state.sales.to;
+      state.salesQuery.kind = state.sales.kind === 'products' ? 'products' : 'tickets';
       if (token !== renderToken) return;
       mount(shell(salesView()));
       return;
@@ -1871,6 +1924,7 @@ async function onSubmit(event) {
         from: values.from || '',
         to: values.to || '',
         q: String(values.q || '').trim(),
+        kind: state.salesQuery.kind === 'products' ? 'products' : 'tickets',
       };
       await render();
       return;
@@ -2409,13 +2463,14 @@ async function onClick(event) {
     mount(shell(screensView()));
     return;
   }
-  if (action === 'preset') {
+  if (action === 'sales-kind' || action === 'preset') {
     const form = document.getElementById('sales-form');
     state.salesQuery = {
-      preset: control.dataset.preset,
+      preset: action === 'preset' ? control.dataset.preset : state.salesQuery.preset,
       from: form?.from.value || '',
       to: form?.to.value || '',
       q: form?.q.value.trim() || '',
+      kind: action === 'sales-kind' ? control.dataset.kind : state.salesQuery.kind,
     };
     await render();
     return;

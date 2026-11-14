@@ -1528,11 +1528,74 @@ app.get('/api/sales', requireAuth, (req, res) => {
   }
   expireOld();
   const query = String(req.query.q || '').trim().slice(0, 80);
+  const kind = req.query.kind === 'products' ? 'products' : 'tickets';
   const params = [range.from.toISOString(), range.to.toISOString()];
+  const like = query ? `%${query.replace(/[%_]/g, '')}%` : '';
+  const inclusiveEnd = new Date(range.to.getTime() - 1);
+  const period = {
+    kind,
+    preset: String(req.query.preset || 'day'),
+    from: ymd(range.from),
+    to: ymd(inclusiveEnd),
+    label: formatRange(range.from, range.to),
+    query,
+  };
+  if (kind === 'products') {
+    let sql = `
+      SELECT pi.product_name, pi.unit_price_cents, pi.quantity,
+             p.created_at, p.payment_method,
+             t.code AS ticket_code, t.alias, t.event_name
+      FROM purchase_items pi
+      JOIN purchases p ON p.id = pi.purchase_id
+      JOIN tickets t ON t.id = p.ticket_id
+      WHERE p.created_at >= ? AND p.created_at < ?`;
+    if (like) {
+      sql += ' AND pi.product_name LIKE ? COLLATE NOCASE';
+      params.push(like);
+    }
+    sql += ' ORDER BY p.created_at DESC, pi.id DESC';
+    const rows = db.prepare(sql).all(...params);
+    const grouped = new Map();
+    const totals = { units: 0, products: 0, sales: 0, revenueCents: 0 };
+    for (const row of rows) {
+      const units = num(row.quantity);
+      const revenue = units * num(row.unit_price_cents);
+      totals.units += units;
+      totals.sales += 1;
+      totals.revenueCents += revenue;
+      const name = row.product_name;
+      const group = grouped.get(name) || { name, units: 0, sales: 0, revenueCents: 0 };
+      group.units += units;
+      group.sales += 1;
+      group.revenueCents += revenue;
+      grouped.set(name, group);
+    }
+    totals.products = grouped.size;
+    const { grain, series } = buildSeries(rows, range.from, range.to, String(req.query.preset || 'day'));
+    res.json({
+      ...period,
+      grain,
+      totals,
+      series,
+      products: [...grouped.values()].sort((left, right) => right.revenueCents - left.revenueCents || right.units - left.units),
+      rows: rows.map((row) => ({
+        productName: row.product_name,
+        quantity: num(row.quantity),
+        unitPriceCents: num(row.unit_price_cents),
+        totalCents: num(row.quantity) * num(row.unit_price_cents),
+        createdAt: row.created_at,
+        paymentMethod: row.payment_method || '',
+        ticketCode: row.ticket_code || '',
+        alias: row.alias || '',
+        eventName: row.event_name || '',
+      })),
+    });
+    return;
+  }
   let sql = 'SELECT * FROM tickets WHERE created_at >= ? AND created_at < ?';
-  if (query) {
+  if (like) {
     sql += ' AND event_name LIKE ? COLLATE NOCASE';
-    params.push(`%${query.replace(/[%_]/g, '')}%`);
+    params.push(like);
   }
   sql += ' ORDER BY created_at DESC';
   const rows = db.prepare(sql).all(...params);
@@ -1543,14 +1606,9 @@ app.get('/api/sales', requireAuth, (req, res) => {
     return sum;
   }, { tickets: 0, qrs: 0, revenueCents: 0 });
   const { grain, series } = buildSeries(rows, range.from, range.to, String(req.query.preset || 'day'));
-  const inclusiveEnd = new Date(range.to.getTime() - 1);
   res.json({
-    preset: String(req.query.preset || 'day'),
-    from: ymd(range.from),
-    to: ymd(inclusiveEnd),
-    label: formatRange(range.from, range.to),
+    ...period,
     grain,
-    query,
     totals,
     series,
     rows: rows.map(presentTicket),

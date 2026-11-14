@@ -281,7 +281,7 @@ function homeView(events) {
           <div class="event-grid">${cards}</div>
         </div>
       </section>
-      <footer class="footer"><div class="wrap">Tasca Los Sierra · Electro</div></footer>
+      <footer class="footer"><div class="wrap"><p>Tasca Los Sierra · Electro</p><p>En el celular, usa el menú del navegador y elige Agregar a la pantalla de inicio. Se abre a pantalla completa, como una app.</p></div></footer>
     </div>`;
 }
 
@@ -1212,6 +1212,7 @@ async function render() {
   const token = ++renderToken;
   stopCamera();
   stopScreen();
+  document.body.classList.remove('nav-open');
   if (currentPath() === '/pantalla') {
     await renderScreen();
     return;
@@ -1504,8 +1505,9 @@ async function onClick(event) {
   if (!control) return;
   const action = control.dataset.action;
   if (action === 'menu') {
-    document.querySelector('.sidebar')?.classList.toggle('open');
-    document.querySelector('.backdrop')?.classList.toggle('show');
+    const open = document.querySelector('.sidebar')?.classList.toggle('open');
+    document.querySelector('.backdrop')?.classList.toggle('show', open);
+    document.body.classList.toggle('nav-open', open);
     return;
   }
   if (action === 'logout') {
@@ -1894,9 +1896,14 @@ document.addEventListener('keydown', (event) => {
     document.querySelector('.modal-back')?.remove();
     document.querySelector('.sidebar')?.classList.remove('open');
     document.querySelector('.backdrop')?.classList.remove('show');
+    document.body.classList.remove('nav-open');
   }
 });
 window.addEventListener('popstate', () => render());
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 
 api('/api/me', { soft: true })
   .then((data) => {

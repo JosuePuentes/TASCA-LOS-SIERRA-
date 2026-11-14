@@ -353,26 +353,40 @@ th { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: 
   .filters { grid-template-columns: 1fr 1fr; }
   .login-aside { min-height: 280px; }
 }
+body.nav-open { overflow: hidden; }
 @media (max-width: 860px) {
   .shell { grid-template-columns: 1fr; }
-  .menu-btn { display: inline-flex; }
+  .menu-btn { display: inline-flex; width: 48px; height: 48px; }
+  .topbar { padding-top: env(safe-area-inset-top); min-height: calc(64px + env(safe-area-inset-top)); }
   .sidebar {
     position: fixed;
     z-index: 21;
-    width: min(280px, 86vw);
+    top: 0;
+    height: 100dvh;
+    width: min(320px, 88vw);
+    padding-top: calc(22px + env(safe-area-inset-top));
+    padding-bottom: calc(22px + env(safe-area-inset-bottom));
     transform: translateX(-105%);
     transition: transform 160ms ease;
   }
   .sidebar.open { transform: none; }
-  .backdrop.show { display: block; position: fixed; inset: 0; background: rgba(20, 12, 8, 0.48); z-index: 20; }
+  .side-link, .side-btn { min-height: 48px; display: flex; align-items: center; }
+  .backdrop.show { display: block; position: fixed; inset: 0; background: rgba(7, 7, 18, 0.62); z-index: 20; }
   .event-row { align-items: flex-start; flex-direction: column; }
+  .content { padding-bottom: calc(40px + env(safe-area-inset-bottom)); }
+  .public .topnav { padding-top: env(safe-area-inset-top); }
+  .toast { left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); }
+  input, select, textarea { font-size: 16px; }
 }
 @media (max-width: 640px) {
-  .grid-stats { grid-template-columns: 1fr 1fr; }
+  .grid-stats, .grid-stats.thirds { grid-template-columns: 1fr 1fr; }
+  .filters { grid-template-columns: 1fr; }
   .stub { grid-template-columns: 1fr; }
   .stub-qr { border-left: 0; border-top: 1px dashed var(--line); }
-  .hero { padding-top: 48px; }
+  .hero, .public .hero { padding-top: 48px; }
   .content, .wrap { width: min(1100px, calc(100% - 28px)); }
+  .stat-value, .event-card .price { font-size: 28px; }
+  .checks { grid-template-columns: 1fr; }
 }
 
 .public {

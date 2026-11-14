@@ -1,0 +1,16 @@
+{
+  "name": "tasca-los-sierra",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-sqlite server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "multer": "^2.5.0",
+    "qrcode": "^1.5.4"
+  }
+}

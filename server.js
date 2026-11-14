@@ -1306,6 +1306,17 @@ app.get('/api/screens', requireAuth, (req, res) => {
   res.json({ screens: screens.map(presentScreen) });
 });
 
+app.post('/api/screens/pair', requireAuth, (req, res) => {
+  const code = String(req.body.code || '').replace(/\s+/g, '');
+  const name = String(req.body.name || '').trim();
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'El código son 6 números, tal como sale en el televisor.' });
+  if (name.length < 2 || name.length > 40) return res.status(400).json({ error: 'Ponle un nombre de 2 a 40 caracteres.' });
+  const screen = db.prepare('SELECT * FROM screens WHERE code = ?').get(code);
+  if (!screen) return res.status(404).json({ error: 'No hay una pantalla con ese código. Ábrela en el televisor y espera a que aparezca.' });
+  db.prepare(`UPDATE screens SET name = ?, status = 'linked' WHERE id = ?`).run(name, screen.id);
+  res.json({ screen: presentScreen(db.prepare('SELECT * FROM screens WHERE id = ?').get(screen.id)) });
+});
+
 app.post('/api/screens/:id/link', requireAuth, (req, res) => {
   const id = Number(req.params.id);
   const screen = db.prepare('SELECT * FROM screens WHERE id = ?').get(id);

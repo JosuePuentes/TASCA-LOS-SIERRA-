@@ -209,8 +209,9 @@ function shell(content) {
     ['/panel/pantallas', 'Pantallas', 'pantallas'],
     ['/panel/usuarios', 'Usuarios', 'usuarios'],
   ].filter((item) => allow(item[2]));
+  const current = [...items, ['/panel/cuenta', 'Cuenta']].find(([href]) => href === path);
   return `
-    <div class="shell public">
+    <div class="shell night">
       <div class="backdrop" data-action="menu"></div>
       <aside class="sidebar">
         <a class="brand brand-light" href="/" data-link>${mark()}<span>Los Sierra</span></a>
@@ -226,6 +227,7 @@ function shell(content) {
       <div class="main">
         <header class="topbar">
           <button class="menu-btn" type="button" data-action="menu" aria-label="Abrir menú"><span></span><span></span><span></span></button>
+          <span class="module-title">${esc(current?.[1] || 'Panel')}</span>
           <div class="topbar-space"></div>
           <span class="who">${esc(state.user?.username || '')}</span>
         </header>
@@ -1065,13 +1067,22 @@ function screensView() {
         <p class="price-line"><span class="dot ${screen.online ? 'on' : ''}"></span> Código ${esc(screen.code.slice(0, 3))} ${esc(screen.code.slice(3))} · ${screen.online ? 'En línea' : 'Sin conexión'}${screen.content ? ` · ${screen.content.kind === 'youtube' ? 'YouTube' : screen.content.kind === 'video' ? 'Video' : 'Imagen'}` : ''}</p>
       </div>
       <div class="row-actions">
-        ${screen.status === 'pending' ? `<input class="screen-name" data-screen-name="${screen.id}" placeholder="Nombre" maxlength="40"><button class="btn primary small" type="button" data-action="link-screen" data-id="${screen.id}">Vincular</button>` : `<button class="btn ghost small" type="button" data-action="clear-screen" data-id="${screen.id}">Quitar contenido</button>`}
+        ${screen.status === 'pending' ? `<span class="pair-code-label">${esc(screen.code.slice(0, 3))} ${esc(screen.code.slice(3))}</span><input class="screen-name" data-screen-name="${screen.id}" placeholder="Nombre de esta pantalla" maxlength="40" aria-label="Nombre de esta pantalla"><button class="btn primary small" type="button" data-action="link-screen" data-id="${screen.id}">Vincular</button>` : `<button class="btn ghost small" type="button" data-action="clear-screen" data-id="${screen.id}">Quitar contenido</button>`}
         <button class="btn danger small" type="button" data-action="delete-screen" data-id="${screen.id}">Quitar</button>
       </div>
     </article>`).join('') : `<div class="empty"><h3>No hay pantallas</h3><p class="lead">Abre la dirección de abajo en el televisor. El código aparecerá allí.</p></div>`;
   return `
     <h2>Pantallas</h2>
-    <p class="lead page-lead">Abre <strong>${esc(location.origin)}/pantalla</strong> en cada televisor. El código que salga lo vinculas aquí. El contenido no depende del usuario: queda en esa pantalla.</p>
+    <p class="lead page-lead">Abre <strong>${esc(location.origin)}/pantalla</strong> en el televisor, en este mismo sitio. Copia el código de 6 números y escríbelo aquí.</p>
+    <section class="card" style="margin-bottom:16px">
+      <h3>Vincular pantalla</h3>
+      <form class="pair-form" data-form="screen-pair">
+        <label class="field"><span>Código</span><input name="code" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="000 000" required></label>
+        <label class="field"><span>Nombre</span><input name="name" maxlength="40" placeholder="Televisor de la sala" required></label>
+        <button class="btn primary" type="submit">Vincular</button>
+        <p class="form-error" hidden></p>
+      </form>
+    </section>
     <div class="split">
       <section class="card">
         <h3>Reproducir</h3>
@@ -1109,7 +1120,7 @@ function paintScreen(screen) {
   stage.dataset.signature = signature;
   if (screen.status !== 'linked') {
     stage.className = 'screen-stage wait';
-    stage.innerHTML = `<div><p class="eyebrow">Tasca Los Sierra</p><p class="pair-code">${esc(screen.code.slice(0, 3))} ${esc(screen.code.slice(3))}</p><p>En el panel, vincula esta pantalla con este código.</p></div>`;
+    stage.innerHTML = `<div><p class="eyebrow">Tasca Los Sierra</p><p class="pair-code">${esc(screen.code.slice(0, 3))} ${esc(screen.code.slice(3))}</p><p>En el panel, entra a Pantallas y escribe este código en Vincular pantalla.</p></div>`;
     return;
   }
   if (!screen.content) {
@@ -1327,7 +1338,14 @@ async function render() {
   }
 }
 
+function closeMenu() {
+  document.querySelector('.sidebar')?.classList.remove('open');
+  document.querySelector('.backdrop')?.classList.remove('show');
+  document.body.classList.remove('nav-open');
+}
+
 function navigate(path) {
+  closeMenu();
   if (currentPath() === path) return render();
   history.pushState({}, '', path);
   return render();
@@ -1410,6 +1428,13 @@ async function onSubmit(event) {
         });
         toast('Usuario creado.');
       }
+      await render();
+      return;
+    }
+    if (kind === 'screen-pair') {
+      const code = String(values.code || '').replace(/\s+/g, '');
+      await api('/api/screens/pair', { method: 'POST', body: { code, name: values.name } });
+      toast('Pantalla vinculada.');
       await render();
       return;
     }

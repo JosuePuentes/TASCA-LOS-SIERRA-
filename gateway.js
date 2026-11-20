@@ -6,9 +6,15 @@ import licoreria, { hosts } from './licoreria-ad/server.js';
 
 const gate = express();
 gate.set('trust proxy', true);
+function isLicoreria(host) {
+  if (String(process.env.NEGOCIO || '').toLowerCase() === 'licoreria-ad') return true;
+  if (hosts.has(host)) return true;
+  return host.endsWith('.vercel.app') && host.includes('licoreria');
+}
+
 gate.use((req, res, next) => {
   const host = String(req.hostname || '').toLowerCase();
-  if (hosts.has(host)) return licoreria(req, res, next);
+  if (isLicoreria(host)) return licoreria(req, res, next);
   return tasca(req, res, next);
 });
 

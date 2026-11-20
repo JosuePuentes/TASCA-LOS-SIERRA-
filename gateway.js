@@ -8,8 +8,14 @@ const gate = express();
 gate.set('trust proxy', true);
 function isLicoreria(host) {
   if (String(process.env.NEGOCIO || '').toLowerCase() === 'licoreria-ad') return true;
+  const deployment = [
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_URL,
+    process.env.VERCEL_BRANCH_URL,
+  ].join(' ').toLowerCase();
+  if (deployment.includes('licoreria')) return true;
   if (hosts.has(host)) return true;
-  return host.endsWith('.vercel.app') && host.includes('licoreria');
+  return host.includes('licoreria');
 }
 
 gate.use((req, res, next) => {

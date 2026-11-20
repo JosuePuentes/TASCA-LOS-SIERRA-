@@ -1,0 +1,18 @@
+{
+  "id": "licoreria-ad",
+  "hosts": ["licoreria.localhost"],
+  "schema": "licoreria_ad",
+  "name": "Licorería A&D",
+  "shortName": "A&D",
+  "codePrefix": "AD",
+  "description": "Venta, factura con QR y barra de Licorería A&D.",
+  "sessionName": "ad.session",
+  "adminUser": "admin",
+  "adminPassword": "LicoreriaAD12",
+  "themeColor": "#1a120e",
+  "background": "#1a120e",
+  "eyebrow": "Licorería",
+  "lead": "Venta directa, factura con QR y entrega en barra.",
+  "loginTitle": "La puerta de la licorería.",
+  "loginLead": "Desde aquí se factura, se entrega en barra y se lleva el inventario."
+}

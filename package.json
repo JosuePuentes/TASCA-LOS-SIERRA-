@@ -7,7 +7,7 @@
     "node": "22.x"
   },
   "scripts": {
-    "start": "node --experimental-sqlite server.js"
+    "start": "node --experimental-sqlite gateway.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

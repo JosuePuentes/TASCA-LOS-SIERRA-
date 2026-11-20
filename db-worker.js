@@ -1,25 +1,40 @@
-import { parentPort } from 'node:worker_threads';
+import { parentPort, workerData } from 'node:worker_threads';
 import pg from 'pg';
 
 const connectionString = process.env.DATABASE_URL;
 const needsSsl = /render\.com|sslmode=require/i.test(connectionString || '');
-const pool = new pg.Pool({
+const schema = String(workerData?.schema || 'public');
+if (!/^[a-z_]+$/.test(schema)) throw new Error('El esquema del negocio no es válido.');
+const ownSchema = schema !== 'public';
+const pool = ownSchema ? null : new pg.Pool({
   connectionString,
   ssl: needsSsl ? { rejectUnauthorized: false } : false,
   max: 4,
   connectionTimeoutMillis: 60000,
 });
+const schemaClient = ownSchema ? new pg.Client({
+  connectionString,
+  ssl: needsSsl ? { rejectUnauthorized: false } : false,
+  connectionTimeoutMillis: 60000,
+}) : null;
+const schemaReady = schemaClient
+  ? schemaClient.connect().then(async () => {
+    await schemaClient.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+    await schemaClient.query(`SET search_path TO ${schema}`);
+  })
+  : null;
 pg.types.setTypeParser(20, (value) => Number(value));
 
 let tx = null;
+let schemaInTx = false;
 
 function translate(sql, params) {
   let text = String(sql || '');
   const info = text.match(/^\s*PRAGMA\s+table_info\((\w+)\)\s*$/i);
   if (info) {
     return {
-      text: `SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position`,
-      params: [info[1]],
+      text: `SELECT column_name AS name FROM information_schema.columns WHERE table_schema = $2 AND table_name = $1 ORDER BY ordinal_position`,
+      params: [info[1], schema],
     };
   }
   text = text.replace(/LIKE\s+\?\s+COLLATE\s+NOCASE/gi, 'ILIKE ?');
@@ -42,6 +57,31 @@ function splitSql(sql) {
 
 async function runOne(sql, params) {
   const trimmed = String(sql || '').trim();
+  if (ownSchema) {
+    await schemaReady;
+    if (/^BEGIN\b/i.test(trimmed)) {
+      await schemaClient.query('BEGIN');
+      schemaInTx = true;
+      return { changes: 0, lastInsertRowid: 0, rows: [] };
+    }
+    if (/^COMMIT\b/i.test(trimmed)) {
+      if (schemaInTx) await schemaClient.query('COMMIT');
+      schemaInTx = false;
+      return { changes: 0, lastInsertRowid: 0, rows: [] };
+    }
+    if (/^ROLLBACK\b/i.test(trimmed)) {
+      if (schemaInTx) await schemaClient.query('ROLLBACK');
+      schemaInTx = false;
+      return { changes: 0, lastInsertRowid: 0, rows: [] };
+    }
+    const statement = translate(trimmed, params);
+    const result = await schemaClient.query(statement.text, statement.params);
+    return {
+      changes: result.rowCount || 0,
+      lastInsertRowid: result.rows?.[0]?.id ?? 0,
+      rows: result.rows || [],
+    };
+  }
   if (/^BEGIN\b/i.test(trimmed)) {
     if (!tx) tx = await pool.connect();
     await tx.query('BEGIN');
@@ -84,7 +124,8 @@ async function handle(message) {
 parentPort.on('message', async (message) => {
   if (message.op === 'close') {
     if (tx) tx.release();
-    await pool.end();
+    if (schemaClient) await schemaClient.end();
+    if (pool) await pool.end();
     message.port.postMessage({ ok: true });
     return;
   }

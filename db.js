@@ -12,9 +12,10 @@ function waitFor(port, worker) {
   throw new Error('PostgreSQL no respondió a tiempo.');
 }
 
-function openPostgres() {
+function openPostgres(schema = 'public') {
   const worker = new Worker(new URL('./db-worker.js', import.meta.url), {
     env: process.env,
+    workerData: { schema },
   });
   worker.unref();
   const call = (op, sql, params) => {
@@ -51,7 +52,7 @@ function openPostgres() {
   };
 }
 
-export function openDatabase(sqlitePath) {
-  if (process.env.DATABASE_URL) return openPostgres();
+export function openDatabase(sqlitePath, options = {}) {
+  if (process.env.DATABASE_URL) return openPostgres(options.schema || 'public');
   return new DatabaseSync(sqlitePath);
 }

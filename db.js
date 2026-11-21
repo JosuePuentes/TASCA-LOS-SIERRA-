@@ -22,7 +22,11 @@ function openPostgres(schema = 'public') {
     const { port1, port2 } = new MessageChannel();
     worker.postMessage({ op, sql, params, port: port2 }, [port2]);
     const message = waitFor(port1, worker);
-    if (!message.ok) throw new Error(message.error || 'Error de base de datos.');
+    if (!message.ok) {
+      const error = new Error(message.error || 'Error de base de datos.');
+      error.code = message.code || '';
+      throw error;
+    }
     return message.result;
   };
   return {

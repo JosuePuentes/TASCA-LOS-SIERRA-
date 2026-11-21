@@ -25,6 +25,15 @@ const state = {
   barraSale: null,
   barraPicks: {},
   issuedSale: null,
+  saleCurrency: 'usd',
+  bcvRate: 0,
+  summaryQuery: { preset: 'day', from: '', to: '' },
+  suppliers: [],
+  supplierPurchases: [],
+  supplierOpen: false,
+  buyLines: [],
+  expenses: [],
+  expenseQuery: { preset: 'month', from: '', to: '' },
   publicSale: null,
   sheet: null,
   moves: null,
@@ -40,6 +49,9 @@ const MODULES = [
   ['venta', 'Venta'],
   ['barra', 'Barra'],
   ['inventario', 'Inventario'],
+  ['compras', 'Compras'],
+  ['cargas', 'Cargas y descargas'],
+  ['gastos', 'Gastos'],
   ['ventas', 'Ventas'],
   ['movimientos', 'Movimientos'],
   ['pantallas', 'Pantallas'],
@@ -107,6 +119,9 @@ function pageTitle(path) {
     '/panel/venta': 'Venta',
     '/panel/barra': 'Barra',
     '/panel/inventario': 'Inventario',
+    '/panel/compras': 'Compras',
+    '/panel/cargas': 'Cargas y descargas',
+    '/panel/gastos': 'Gastos',
     '/panel/ventas': 'Ventas',
     '/panel/movimientos': 'Movimientos',
     '/panel/pantallas': 'Pantallas',
@@ -133,6 +148,44 @@ function money(cents) {
     maximumFractionDigits: 2,
   });
   return `${formatted} $`;
+}
+
+function moneyBs(cents) {
+  const formatted = (Number(cents) / 100).toLocaleString('es-VE', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${formatted} Bs`;
+}
+
+function bsCents(usdCents, rate = state.bcvRate) {
+  const value = Number(rate) || 0;
+  if (value <= 0) return 0;
+  return Math.round(Number(usdCents) * value);
+}
+
+function displayMoney(cents) {
+  if (currentPath() === '/panel/venta' && state.saleCurrency === 'bs') {
+    if (!(Number(state.bcvRate) > 0)) return 'Sin tasa BCV';
+    return moneyBs(bsCents(cents));
+  }
+  return money(cents);
+}
+
+function chargedTotal(sale) {
+  if (!sale) return '';
+  if (sale.currency === 'bs') return moneyBs(sale.totalBsCents || bsCents(sale.totalCents, sale.bcvRate));
+  return money(sale.totalCents);
+}
+
+function todayInput() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+function acceptsCurrency(product) {
+  if (state.saleCurrency === 'bs') return product.payBs !== false;
+  return product.payUsd !== false;
 }
 
 function formatDateTime(iso) {
@@ -266,6 +319,9 @@ function shell(content) {
     ['/panel/venta', 'Venta', 'venta'],
     ['/panel/barra', 'Barra', 'barra'],
     ['/panel/inventario', 'Inventario', 'inventario'],
+    ['/panel/compras', 'Compras', 'compras'],
+    ['/panel/cargas', 'Cargas y descargas', 'cargas'],
+    ['/panel/gastos', 'Gastos', 'gastos'],
     ['/panel/ventas', 'Ventas', 'ventas'],
     ['/panel/movimientos', 'Movimientos', 'movimientos'],
     ['/panel/pantallas', 'Pantallas', 'pantallas'],
@@ -369,7 +425,10 @@ function ticketRows(rows) {
 
 function dashboardView() {
   const dash = state.dash || {};
+  const query = state.summaryQuery;
   const recent = dash.recent || [];
+  const payments = dash.payments || [];
+  const series = (dash.series || []).filter((row) => row.salesCents || row.salesBs);
   const rows = recent.length
     ? `<div class="event-list">${recent.map((sale) => `
         <article class="event-row">
@@ -377,28 +436,56 @@ function dashboardView() {
             <h3>${esc(sale.customerName)}</h3>
             <p class="price-line">Factura ${esc(sale.numberLabel)} · ${formatDateTime(sale.createdAt)} · ${sale.refundedAt ? 'Devuelta' : paymentLabel(sale.paymentMethod)}</p>
           </div>
-          <strong>${sale.refundedAt ? 'Devuelta' : money(sale.totalCents)}</strong>
+          <strong>${sale.refundedAt ? 'Devuelta' : chargedTotal(sale)}</strong>
         </article>`).join('')}</div>`
     : `<div class="empty"><h3>Todavía no hay facturas</h3><p class="lead">La primera venta aparece aquí.</p></div>`;
+  const paymentRows = payments.length
+    ? payments.map((row) => `<article class="event-row"><div><h3>${esc(paymentLabel(row.method))}</h3><p class="price-line">${row.count} factura${row.count === 1 ? '' : 's'}</p></div><strong>${money(row.salesCents)} · ${moneyBs(row.salesBs)}</strong></article>`).join('')
+    : `<p class="hint">En este periodo no hay cobros.</p>`;
+  const seriesRows = series.length
+    ? series.map((row) => `<p class="price-line">${esc(row.label)} · ${money(row.salesCents)} · ${moneyBs(row.salesBs)}</p>`).join('')
+    : `<p class="hint">Sin ventas en este periodo.</p>`;
   return `
     <h2>Resumen</h2>
-    <p class="lead page-lead">Cada venta emite una factura con QR. En barra se marca lo que se entrega.</p>
+    <p class="lead page-lead">${esc(dash.label || 'Periodo')} · Tasa BCV ${Number(dash.rate) > 0 ? Number(dash.rate).toLocaleString('es-VE', { maximumFractionDigits: 4 }) : 'sin colocar'}</p>
+    <form class="card no-print" data-form="summary" style="margin-bottom:16px">
+      <div class="cart-add">
+        <label class="field"><span>Periodo</span>
+          <select name="preset">
+            <option value="hour" ${query.preset === 'hour' ? 'selected' : ''}>Hoy, por hora</option>
+            <option value="day" ${query.preset === 'day' ? 'selected' : ''}>Hoy</option>
+            <option value="week" ${query.preset === 'week' ? 'selected' : ''}>Esta semana</option>
+            <option value="month" ${query.preset === 'month' ? 'selected' : ''}>Este mes</option>
+            <option value="custom" ${query.preset === 'custom' ? 'selected' : ''}>Entre fechas</option>
+          </select>
+        </label>
+        <label class="field"><span>Desde</span><input name="from" type="date" value="${esc(query.from || '')}"></label>
+        <label class="field"><span>Hasta</span><input name="to" type="date" value="${esc(query.to || '')}"></label>
+      </div>
+      <button class="btn primary" type="submit">Ver rendimiento</button>
+    </form>
     <div class="grid-stats">
-      <article class="stat"><p class="stat-label">Facturas de hoy</p><p class="stat-value">${dash.salesToday || 0}</p></article>
-      <article class="stat"><p class="stat-label">Cobrado hoy</p><p class="stat-value">${money(dash.revenueToday || 0)}</p></article>
-      <article class="stat"><p class="stat-label">Cobrado del mes</p><p class="stat-value">${money(dash.revenueMonth || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Ventas en dólares</p><p class="stat-value">${money(dash.salesCents || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Costo en dólares</p><p class="stat-value">${money(dash.costCents || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Utilidad en dólares</p><p class="stat-value">${money(dash.profitCents || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Facturas</p><p class="stat-value">${dash.invoices || 0}</p></article>
+    </div>
+    <div class="grid-stats">
+      <article class="stat"><p class="stat-label">Ventas en bolívares</p><p class="stat-value">${moneyBs(dash.salesBs || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Costo en bolívares</p><p class="stat-value">${moneyBs(dash.costBs || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Utilidad en bolívares</p><p class="stat-value">${moneyBs(dash.profitBs || 0)}</p></article>
       <article class="stat"><p class="stat-label">Por entregar</p><p class="stat-value">${dash.pending || 0}</p></article>
     </div>
-    <div class="actions no-print">
-      ${allow('venta') ? '<a class="btn primary" href="/panel/venta" data-link>Nueva venta</a>' : ''}
-      ${allow('barra') ? '<a class="btn ghost" href="/panel/barra" data-link>Abrir barra</a>' : ''}
-      ${allow('ventas') ? '<a class="btn ghost" href="/panel/ventas" data-link>Ver ventas</a>' : ''}
+    <div class="grid-stats thirds">
+      <article class="stat"><p class="stat-label">Gastos en dólares</p><p class="stat-value">${money(dash.expensesCents || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Gastos en bolívares</p><p class="stat-value">${moneyBs(dash.expensesBs || 0)}</p></article>
+      <article class="stat"><p class="stat-label">Ventas menos gastos</p><p class="stat-value">${money((dash.salesCents || 0) - (dash.expensesCents || 0))}</p></article>
     </div>
-    <section class="card">
-      <h3>Últimas facturas</h3>
-      <div style="height:12px"></div>
-      ${rows}
-    </section>`;
+    <div class="pos-grid">
+      <section class="card"><h3>Cómo está ingresando</h3><div class="event-list" style="margin-top:12px">${paymentRows}</div></section>
+      <section class="card"><h3>${query.preset === 'hour' || query.preset === 'day' ? 'Por hora' : 'Por día'}</h3><div style="margin-top:12px">${seriesRows}</div></section>
+    </div>
+    <section class="card"><h3>Últimas facturas</h3><div style="height:12px"></div>${rows}</section>`;
 }
 
 function eventsView() {
@@ -588,6 +675,25 @@ function unitAmounts(form) {
 }
 
 let priceSync = false;
+let moneySync = false;
+
+function syncProfitAndPrice(target) {
+  const form = target?.closest?.('form[data-form="product"]');
+  if (!form || moneySync || !form.profit) return;
+  const name = target?.name;
+  if (name !== 'profit' && name !== 'price' && name !== 'cost') return;
+  const cost = centsFromInput(form.cost.value);
+  if (cost == null) return;
+  moneySync = true;
+  if (name === 'profit') {
+    const profit = centsFromInput(form.profit.value);
+    if (profit != null) form.price.value = moneyInput(cost + profit);
+  } else {
+    const price = centsFromInput(form.price.value);
+    if (price != null) form.profit.value = moneyInput(price - cost);
+  }
+  moneySync = false;
+}
 
 function syncPackPrices(target) {
   const form = target?.closest?.('form[data-form="product"]') || document.querySelector('form[data-form="product"]');
@@ -655,15 +761,16 @@ function stockMark(product) {
     </div>`;
 }
 
-function inventoryMatches(name) {
+function inventoryMatches(product) {
   const text = (state.inventoryQuery || '').trim().toLocaleLowerCase('es');
   if (!text) return true;
-  return String(name || '').toLocaleLowerCase('es').includes(text);
+  const source = typeof product === 'string' ? { name: product } : product;
+  return [source?.name, source?.code, source?.department].some((value) => String(value || '').toLocaleLowerCase('es').includes(text));
 }
 
 function productListHtml() {
   const all = state.products.filter((product) => !product.isCombo);
-  const products = all.filter((product) => inventoryMatches(product.name));
+  const products = all.filter((product) => inventoryMatches(product));
   if (!all.length) {
     return `<div class="empty"><h3>El inventario está vacío</h3><p class="lead">Carga cada producto con su costo, su precio de venta y las unidades que tienes.</p></div>`;
   }
@@ -674,8 +781,8 @@ function productListHtml() {
         <article class="event-row ${product.active ? '' : 'inactive'}">
           ${stockMark(product)}
           <div>
-            <h3>${esc(product.name)}</h3>
-            <p class="price-line">Costo ${money(product.costCents)} · Venta ${money(product.priceCents)} · ${product.active ? 'A la venta' : 'Inactivo'}</p>
+            <h3>${product.code ? `${esc(product.code)} · ` : ''}${esc(product.name)}</h3>
+            <p class="price-line">${product.department ? `${esc(product.department)} · ` : ''}Costo ${money(product.costCents)} · Venta ${money(product.priceCents)}${Number(state.bcvRate) > 0 ? ` · ${moneyBs(bsCents(product.priceCents))}` : ''} · ${product.active ? 'A la venta' : 'Inactivo'}</p>
             <p class="price-line">${product.unitsPerBox > 1 ? `Caja de ${product.unitsPerBox.toLocaleString('es-ES')} unidades · Venta por caja ${money(product.priceCents * product.unitsPerBox)} · ` : ''}Utilidad ${money(product.profitCents)} por unidad · ${money(product.stockProfitCents)} en estas existencias</p>
           </div>
           <div class="row-actions">
@@ -703,16 +810,20 @@ function inventoryView() {
   const stockValue = editing ? String(editing.stock) : '';
   const costField = editing ? moneyInput(editing.costCents) : '';
   const priceValue = editing ? moneyInput(editing.priceCents) : '';
+  const profitField = editing ? moneyInput(editing.profitCents) : '';
   const boxPriceValue = editing && editing.unitsPerBox > 1 ? moneyInput(editing.priceCents * editing.unitsPerBox) : '';
   return `
     <div class="stack">
       <form class="card product-form" data-form="product">
         <h2>${editing ? 'Editar producto' : 'Cargar producto'}</h2>
         <p class="lead page-lead">Si llega por caja, el costo que escribes es el de la caja y se divide entre las unidades. El precio de venta lo pones por unidad y por caja. En el visor se cobra la unidad.</p>
-        <label class="field"><span>Producto</span><input name="name" maxlength="80" required value="${esc(editing?.name || '')}" placeholder="Nombre del producto"></label>
+        <label class="field"><span>Código del producto</span><input name="code" maxlength="40" value="${esc(editing?.code || '')}" placeholder="Código"></label>
+        <label class="field"><span>Nombre</span><input name="name" maxlength="80" required value="${esc(editing?.name || '')}" placeholder="Nombre del producto"></label>
+        <label class="field"><span>Departamento</span><input name="department" maxlength="60" value="${esc(editing?.department || '')}" placeholder="Cerveza, ron, vino"></label>
         <label class="field"><span>Unidades por caja</span><input name="unitsPerBox" type="number" min="1" max="10000" value="${editing ? esc(String(editing.unitsPerBox || 1)) : ''}" placeholder="36"></label>
         ${editing ? '' : `<label class="field"><span>Cómo llega</span><select name="pack"><option value="unit">Por unidad</option><option value="box">Por caja</option></select></label>`}
         <label class="field"><span id="cost-label">${editing ? 'Costo por unidad' : 'Costo'}</span><input name="cost" inputmode="decimal" required value="${esc(costField)}" placeholder="0,00"></label>
+        <label class="field"><span>Utilidad</span><input name="profit" inputmode="decimal" value="${esc(profitField)}" placeholder="0,00"></label>
         <label class="field"><span>Precio de venta por unidad</span><input name="price" inputmode="decimal" value="${esc(priceValue)}" placeholder="0,00"></label>
         <label class="field" id="box-price-field" ${editing && editing.unitsPerBox > 1 ? '' : 'hidden'}><span>Precio de venta por caja</span><input name="boxPrice" inputmode="decimal" value="${esc(boxPriceValue)}" placeholder="0,00"></label>
         <p class="hint" id="product-profit">Escribe el costo y el precio de venta para ver la utilidad por unidad.</p>
@@ -751,7 +862,9 @@ function inventoryView() {
           </div>
           <div id="combo-parts">${comboPartRows()}</div>
           <p class="hint" id="combo-cost">${comboCostHint()}</p>
-          <label class="check"><input name="active" type="checkbox" ${combo ? (combo.active ? 'checked' : '') : 'checked'}><span>Disponible para vender en el visor</span></label>
+          <label class="check"><input name="payUsd" type="checkbox" ${combo ? (combo.payUsd ? 'checked' : '') : 'checked'}><span>Se cobra en dólares</span></label>
+          <label class="check"><input name="payBs" type="checkbox" ${combo ? (combo.payBs ? 'checked' : '') : 'checked'}><span>Se cobra en bolívares</span></label>
+          <label class="check"><input name="active" type="checkbox" ${combo ? (combo.active ? 'checked' : '') : 'checked'}><span>Disponible para vender</span></label>
           <p class="form-error" hidden></p>
           <div class="row-actions">
             <button class="btn primary" type="submit">${combo ? 'Guardar combo' : 'Crear combo'}</button>
@@ -806,7 +919,7 @@ function comboListHtml(combos) {
     return `<article class="event-row ${item.active ? '' : 'inactive'}">
       <div>
         <h3>${esc(item.name)}</h3>
-        <p class="price-line">Venta ${money(item.priceCents)} · Costo ${money(item.costCents)} · Utilidad ${money(item.profitCents)} · ${item.active ? 'A la venta' : 'Inactivo'}</p>
+        <p class="price-line">Venta ${money(item.priceCents)} · Costo ${money(item.costCents)} · Utilidad ${money(item.profitCents)} · ${[item.payUsd ? 'dólares' : '', item.payBs ? 'bolívares' : ''].filter(Boolean).join(' y ') || 'sin moneda'} · ${item.active ? 'A la venta' : 'Inactivo'}</p>
         <p class="price-line">${recipe}</p>
         <p class="hint">${item.stock > 0 ? `Alcanzan ${item.stock.toLocaleString('es-ES')} combos` : 'No alcanzan las unidades para vender uno'}</p>
       </div>
@@ -883,9 +996,11 @@ function renderAccount() {
 
 function buyMatches(query) {
   const text = query.trim().toLocaleLowerCase('es');
+  const selling = currentPath() === '/panel/venta';
   return state.products
     .filter((product) => product.active)
-    .filter((product) => !text || product.name.toLocaleLowerCase('es').includes(text))
+    .filter((product) => !selling || acceptsCurrency(product))
+    .filter((product) => !text || [product.name, product.code].some((value) => String(value || '').toLocaleLowerCase('es').includes(text)))
     .slice(0, 20);
 }
 
@@ -917,7 +1032,7 @@ function buyResultsHtml(query) {
     return `
     <button class="buy-hit" type="button" data-action="pick-product" data-id="${product.id}" ${product.stock < 1 ? 'disabled' : ''}>
       <strong>${product.isCombo ? 'Combo · ' : ''}${esc(product.name)}</strong>
-      <span>${money(product.priceCents)} · ${stock}${recipe ? ` · ${esc(recipe)}` : ''}</span>
+      <span>${displayMoney(product.priceCents)} · ${stock}${recipe ? ` · ${esc(recipe)}` : ''}</span>
     </button>`;
   }).join('');
 }
@@ -926,7 +1041,7 @@ function cartLinesHtml() {
   if (!state.cart.length) return `<p class="hint">Todavía no agregas productos a esta compra.</p>`;
   return state.cart.map((line) => `
     <div class="balance">
-      <div><strong>${esc(line.name)}</strong><p class="hint">${line.quantity} · ${money(line.priceCents * line.quantity)}</p></div>
+      <div><strong>${esc(line.name)}</strong><p class="hint">${line.quantity} · ${displayMoney(line.priceCents * line.quantity)}</p></div>
       <button class="btn ghost small" type="button" data-action="remove-cart" data-id="${line.productId}">Quitar</button>
     </div>`).join('');
 }
@@ -969,12 +1084,178 @@ function buyModal() {
     </div>`;
 }
 
+function supplierOptions() {
+  if (!state.suppliers.length) return '<option value="">Primero agrega un proveedor</option>';
+  return state.suppliers.map((supplier) => `<option value="${supplier.id}">${esc(supplier.name)}</option>`).join('');
+}
+
+function purchaseLinesHtml() {
+  if (!state.buyLines.length) return '<p class="hint">Busca un producto y selecciónalo para agregarlo a la factura.</p>';
+  return state.buyLines.map((line) => `
+    <div class="card" data-line="${line.productId}" style="margin-top:10px">
+      <strong>${esc(line.name)}</strong>
+      <div class="cart-add">
+        <label class="field"><span>Cantidad</span><input data-field="quantity" type="number" min="1" value="${esc(line.quantity)}"></label>
+        <label class="field"><span>Costo</span><input data-field="cost" inputmode="decimal" value="${esc(line.cost)}"></label>
+        <label class="field"><span>Utilidad</span><input data-field="profit" inputmode="decimal" value="${esc(line.profit)}"></label>
+        <label class="field"><span>Precio de venta</span><input data-field="price" inputmode="decimal" value="${esc(line.price)}"></label>
+      </div>
+      <button class="btn ghost small" type="button" data-action="remove-buy-line" data-id="${line.productId}">Quitar</button>
+    </div>`).join('');
+}
+
+function purchaseHistoryHtml() {
+  if (!state.supplierPurchases.length) return '<p class="hint">Todavía no hay compras cargadas.</p>';
+  return `<div class="event-list">${state.supplierPurchases.map((purchase) => `
+    <article class="event-row">
+      <div>
+        <h3>${esc(purchase.supplierName)}</h3>
+        <p class="price-line">Factura ${esc(purchase.invoiceDate)} · Carga ${formatDateTime(purchase.loadedAt)} · ${esc(paymentLabel(purchase.paymentMethod))}${purchase.dueDate ? ` · Vence ${esc(purchase.dueDate)}` : ''}</p>
+        <p class="hint">${purchase.items.map((item) => `${item.quantity} ${esc(item.productName)}`).join(' · ')}</p>
+      </div>
+      <strong>${money(purchase.totalCents)}</strong>
+    </article>`).join('')}</div>`;
+}
+
+function comprasView() {
+  return `
+    <h2>Compras</h2>
+    <p class="lead page-lead">Aquí entran las facturas de los proveedores. La fecha de carga queda registrada al guardar y las existencias suben en ese momento.</p>
+    <div class="row-actions no-print" style="margin-bottom:12px">
+      <button class="btn ghost" type="button" data-action="toggle-supplier">${state.supplierOpen ? 'Cerrar proveedor' : 'Agregar proveedor'}</button>
+    </div>
+    ${state.supplierOpen ? `
+      <form class="card" data-form="supplier" style="margin-bottom:16px">
+        <h3>Proveedor</h3>
+        <label class="field"><span>Nombre</span><input name="name" maxlength="80" required placeholder="Nombre del proveedor"></label>
+        <div class="cart-add">
+          <label class="field"><span>Documento</span><input name="document" maxlength="40" placeholder="RIF o cédula"></label>
+          <label class="field"><span>Teléfono</span><input name="phone" maxlength="40" placeholder="Teléfono"></label>
+        </div>
+        <label class="field"><span>Correo</span><input name="email" maxlength="80" placeholder="Correo"></label>
+        <label class="field"><span>Dirección</span><input name="address" maxlength="160" placeholder="Dirección"></label>
+        <label class="field"><span>Notas</span><input name="notes" maxlength="240" placeholder="Notas"></label>
+        <p class="form-error" hidden></p>
+        <button class="btn primary" type="submit">Guardar proveedor</button>
+      </form>` : ''}
+    <div class="pos-grid">
+      <form class="card" data-form="supplier-purchase">
+        <label class="field"><span>Proveedor</span><select name="supplierId" required>${supplierOptions()}</select></label>
+        <div class="cart-add">
+          <label class="field"><span>Fecha de factura</span><input name="invoiceDate" type="date" required value="${todayInput()}"></label>
+          <label class="field"><span>Fecha de carga</span><input value="${esc(formatDateTime(new Date().toISOString()))}" disabled></label>
+          <label class="field"><span>Vencimiento</span><input name="dueDate" type="date"></label>
+        </div>
+        <label class="field"><span>Método de pago</span><select name="paymentMethod">${paymentOptions('efectivo')}</select></label>
+        <label class="field"><span>Buscar producto</span><input id="purchase-search" type="search" placeholder="Código o nombre" autocomplete="off"></label>
+        <div id="purchase-results" class="buy-results"></div>
+        <div id="purchase-lines">${purchaseLinesHtml()}</div>
+        <p class="form-error" hidden></p>
+        <button class="btn primary" type="submit">Guardar compra</button>
+      </form>
+      <section class="card">
+        <h3>Últimas compras</h3>
+        <div style="margin-top:12px">${purchaseHistoryHtml()}</div>
+      </section>
+    </div>`;
+}
+
+function purchaseMatches(query) {
+  const text = query.trim().toLocaleLowerCase('es');
+  return state.products
+    .filter((product) => !product.isCombo)
+    .filter((product) => !text || [product.name, product.code, product.department].some((value) => String(value || '').toLocaleLowerCase('es').includes(text)))
+    .slice(0, 12);
+}
+
+function purchaseResultsHtml(query) {
+  const matches = purchaseMatches(query);
+  if (!query.trim()) return '';
+  if (!matches.length) return '<p class="hint">Ningún producto coincide.</p>';
+  return matches.map((product) => `
+    <button class="buy-hit" type="button" data-action="pick-purchase" data-id="${product.id}">
+      <strong>${product.code ? `${esc(product.code)} · ` : ''}${esc(product.name)}</strong>
+      <span>Costo ${money(product.costCents)} · Venta ${money(product.priceCents)} · quedan ${product.stock}</span>
+    </button>`).join('');
+}
+
+function stockBoardHtml() {
+  const query = state.inventoryQuery || '';
+  const matches = purchaseMatches(query);
+  if (!query.trim()) return '<p class="hint">Escribe el código o el nombre para cargar o descargar.</p>';
+  if (!matches.length) return '<p class="hint">Ningún producto coincide.</p>';
+  return matches.map((product) => `
+    <article class="event-row">
+      <div>
+        <h3>${product.code ? `${esc(product.code)} · ` : ''}${esc(product.name)}</h3>
+        <p class="price-line">Quedan ${product.stock.toLocaleString('es-ES')}</p>
+      </div>
+      <div class="row-actions">
+        <input class="stock-add" type="number" min="1" value="1" data-stock-qty="${product.id}" aria-label="Cantidad">
+        <button class="btn primary small" type="button" data-action="stock-move" data-direction="carga" data-id="${product.id}">Cargar</button>
+        <button class="btn ghost small" type="button" data-action="stock-move" data-direction="descarga" data-id="${product.id}">Descargar</button>
+      </div>
+    </article>`).join('');
+}
+
+function cargasView() {
+  return `
+    <h2>Cargas y descargas</h2>
+    <p class="lead page-lead">Busca el producto y suma existencias con una carga, o réstalas con una descarga.</p>
+    <section class="card">
+      <label class="field"><span>Buscar</span><input id="stock-search" type="search" placeholder="Código o nombre" autocomplete="off" value="${esc(state.inventoryQuery || '')}"></label>
+      <div id="stock-board" class="event-list">${stockBoardHtml()}</div>
+    </section>`;
+}
+
+function gastosView() {
+  const rows = state.expenses.length
+    ? `<div class="event-list">${state.expenses.map((expense) => `
+        <article class="event-row">
+          <div>
+            <h3>${esc(expense.description)}</h3>
+            <p class="price-line">${esc(expense.spentAt.slice(0, 10))} · ${expense.currency === 'bs' ? 'Bolívares' : 'Dólares'}${expense.note ? ` · ${esc(expense.note)}` : ''}</p>
+          </div>
+          <strong>${expense.currency === 'bs' ? moneyBs(expense.amountCents) : money(expense.amountCents)}</strong>
+        </article>`).join('')}</div>`
+    : '<p class="hint">No hay gastos en este periodo.</p>';
+  return `
+    <h2>Gastos</h2>
+    <p class="lead page-lead">Estos gastos entran al resumen del mismo periodo, al lado de las ventas.</p>
+    <form class="card" data-form="expense" style="margin-bottom:16px">
+      <label class="field"><span>Gasto</span><input name="description" maxlength="120" required placeholder="Alquiler, luz, flete"></label>
+      <div class="cart-add">
+        <label class="field"><span>Monto</span><input name="amount" inputmode="decimal" required placeholder="0,00"></label>
+        <label class="field"><span>Moneda</span><select name="currency"><option value="usd">Dólares</option><option value="bs">Bolívares</option></select></label>
+        <label class="field"><span>Fecha</span><input name="date" type="date" required value="${todayInput()}"></label>
+      </div>
+      <label class="field"><span>Nota</span><input name="note" maxlength="240" placeholder="Opcional"></label>
+      <p class="form-error" hidden></p>
+      <button class="btn primary" type="submit">Anotar gasto</button>
+    </form>
+    <section class="card">${rows}</section>`;
+}
+
 function posView() {
   if (state.issuedSale) return issuedSaleView(state.issuedSale);
   const total = state.cart.reduce((sum, line) => sum + line.priceCents * line.quantity, 0);
+  const rateText = Number(state.bcvRate) > 0 ? Number(state.bcvRate).toLocaleString('es-VE', { maximumFractionDigits: 4 }) : '';
   return `
     <h2>Venta</h2>
     <p class="lead page-lead">Arma la cuenta, cobra y entrega el QR. Quien lo escanee ve la factura al momento.</p>
+    <section class="card" style="margin-bottom:16px">
+      <div class="cart-add">
+        <label class="field"><span>Tasa BCV</span><input id="bcv-rate" inputmode="decimal" value="${esc(rateText)}" placeholder="Ejemplo: 45,50"></label>
+        <label class="field"><span>Cobrar en</span>
+          <select id="pos-currency">
+            <option value="usd" ${state.saleCurrency === 'usd' ? 'selected' : ''}>Dólares</option>
+            <option value="bs" ${state.saleCurrency === 'bs' ? 'selected' : ''}>Bolívares</option>
+          </select>
+        </label>
+      </div>
+      <button class="btn ghost" type="button" data-action="save-rate">Guardar tasa</button>
+      <p class="hint">El precio en bolívares es el precio en dólares multiplicado por esta tasa. Un combo solo aparece en las monedas que tenga marcadas.</p>
+    </section>
     <div class="pos-grid">
       <section class="card">
         <label class="field"><span>Cliente</span><input id="pos-name" maxlength="80" placeholder="Nombre de quien compra" autocomplete="off"></label>
@@ -989,7 +1270,7 @@ function posView() {
       <section class="card">
         <h3>Cuenta</h3>
         <div id="pos-lines">${cartLinesHtml()}</div>
-        <div class="total-box"><span>Total</span><strong id="pos-total">${money(total)}</strong></div>
+        <div class="total-box"><span>Total</span><strong id="pos-total">${displayMoney(total)}</strong></div>
         <button class="btn primary" type="button" data-action="charge-sale" ${state.cart.length ? '' : 'disabled'}>Cobrar y emitir QR</button>
       </section>
     </div>`;
@@ -1008,7 +1289,7 @@ function issuedSaleView(sale) {
         <h3>${esc(sale.customerName)}</h3>
         <p class="code">Factura ${esc(sale.numberLabel)}</p>
         ${lines}
-        <p class="price-line">${money(sale.totalCents)} · ${esc(paymentLabel(sale.paymentMethod))}</p>
+        <p class="price-line">${chargedTotal(sale)} · ${esc(paymentLabel(sale.paymentMethod))}${sale.currency === 'bs' && sale.bcvRate ? ` · tasa ${sale.bcvRate}` : ''}</p>
         <p class="hint">${esc(formatDateTime(sale.createdAt))}</p>
       </div>
       <div class="stub-qr"><img alt="QR de la factura ${esc(sale.numberLabel)}" src="${sale.qrDataUrl}"></div>
@@ -1020,7 +1301,7 @@ function refreshPosCart() {
   const total = document.getElementById('pos-total');
   const button = document.querySelector('[data-action="charge-sale"]');
   if (lines) lines.innerHTML = cartLinesHtml();
-  if (total) total.textContent = money(state.cart.reduce((sum, line) => sum + line.priceCents * line.quantity, 0));
+  if (total) total.textContent = displayMoney(state.cart.reduce((sum, line) => sum + line.priceCents * line.quantity, 0));
   if (button) button.disabled = state.cart.length === 0;
 }
 
@@ -1167,7 +1448,7 @@ function facturaBody(sale) {
       <span><i class="legend-dot free"></i> Disponible</span>
       <span><i class="legend-dot done"></i> Entregado</span>
     </div>
-    <p class="price-line" style="margin-top:14px">${money(sale.totalCents)} · ${esc(formatDateTime(sale.createdAt))}</p>`;
+    <p class="price-line" style="margin-top:14px">${chargedTotal(sale)} · ${esc(formatDateTime(sale.createdAt))}</p>`;
 }
 
 function findSale(itemId) {
@@ -1607,6 +1888,9 @@ const routeModules = {
   '/panel/venta': 'venta',
   '/panel/barra': 'barra',
   '/panel/inventario': 'inventario',
+  '/panel/compras': 'compras',
+  '/panel/cargas': 'cargas',
+  '/panel/gastos': 'gastos',
   '/panel/ventas': 'ventas',
   '/panel/movimientos': 'movimientos',
   '/panel/pantallas': 'pantallas',
@@ -2161,7 +2445,9 @@ async function render() {
     }
     if (path === '/panel') {
       mount(shell(loading()));
-      state.dash = await api('/api/summary');
+      const query = state.summaryQuery;
+      const params = new URLSearchParams({ preset: query.preset || 'day', from: query.from || '', to: query.to || '' });
+      state.dash = await api(`/api/summary?${params}`);
       if (token !== renderToken) return;
       mount(shell(dashboardView()));
       return;
@@ -2195,10 +2481,41 @@ async function render() {
     if (path === '/panel/venta') {
       state.issuedSale = null;
       mount(shell(loading()));
-      state.products = (await api('/api/products')).products;
+      const [catalog, rate] = await Promise.all([api('/api/products'), api('/api/rate')]);
+      state.products = catalog.products;
+      state.bcvRate = rate.rate;
       if (token !== renderToken) return;
       mount(shell(posView()));
       document.getElementById('pos-search')?.focus();
+      return;
+    }
+    if (path === '/panel/compras') {
+      mount(shell(loading()));
+      const [catalog, suppliers, purchases] = await Promise.all([
+        api('/api/products'),
+        api('/api/suppliers'),
+        api('/api/supplier-purchases'),
+      ]);
+      state.products = catalog.products;
+      state.suppliers = suppliers.suppliers;
+      state.supplierPurchases = purchases.purchases;
+      if (token !== renderToken) return;
+      mount(shell(comprasView()));
+      return;
+    }
+    if (path === '/panel/cargas') {
+      mount(shell(loading()));
+      state.products = (await api('/api/products')).products;
+      if (token !== renderToken) return;
+      mount(shell(cargasView()));
+      document.getElementById('stock-search')?.focus();
+      return;
+    }
+    if (path === '/panel/gastos') {
+      mount(shell(loading()));
+      state.expenses = (await api('/api/expenses?preset=month')).expenses;
+      if (token !== renderToken) return;
+      mount(shell(gastosView()));
       return;
     }
     if (path === '/panel/barra') {
@@ -2214,7 +2531,9 @@ async function render() {
     }
     if (path === '/panel/inventario') {
       mount(shell(loading()));
-      state.products = (await api('/api/products')).products;
+      const [catalog, rate] = await Promise.all([api('/api/products'), api('/api/rate')]);
+      state.products = catalog.products;
+      state.bcvRate = rate.rate;
       if (state.editingProduct) {
         state.editingProduct = state.products.find((product) => product.id === state.editingProduct.id) || null;
       }
@@ -2427,8 +2746,11 @@ async function onSubmit(event) {
     }
     if (kind === 'product') {
       const body = {
+        code: values.code,
         name: values.name,
+        department: values.department,
         cost: values.cost,
+        profit: values.profit,
         price: values.price,
         stock: Number(values.stock),
         unitsPerBox: values.unitsPerBox === '' ? 1 : Number(values.unitsPerBox),
@@ -2453,10 +2775,18 @@ async function onSubmit(event) {
         setFormError(form, 'Agrega al menos un producto al combo.');
         return;
       }
+      const payUsd = Boolean(form.querySelector('input[name="payUsd"]')?.checked);
+      const payBs = Boolean(form.querySelector('input[name="payBs"]')?.checked);
+      if (!payUsd && !payBs) {
+        setFormError(form, 'Elige al menos una moneda: dólares o bolívares.');
+        return;
+      }
       const body = {
         name: values.name,
         price: values.price,
         active: Boolean(form.querySelector('input[name="active"]')?.checked),
+        payUsd,
+        payBs,
         items: state.comboParts.map((part) => ({ productId: part.productId, quantity: part.quantity })),
       };
       if (state.editingCombo) await api(`/api/combos/${state.editingCombo.id}`, { method: 'PATCH', body });
@@ -2464,6 +2794,50 @@ async function onSubmit(event) {
       state.editingCombo = null;
       state.comboParts = [];
       toast('Combo guardado.');
+      await render();
+      return;
+    }
+    if (kind === 'summary') {
+      state.summaryQuery = { preset: values.preset || 'day', from: values.from || '', to: values.to || '' };
+      await render();
+      return;
+    }
+    if (kind === 'supplier') {
+      await api('/api/suppliers', { method: 'POST', body: values });
+      state.supplierOpen = false;
+      toast('Proveedor guardado.');
+      await render();
+      return;
+    }
+    if (kind === 'supplier-purchase') {
+      if (!state.buyLines.length) {
+        setFormError(form, 'Agrega al menos un producto.');
+        return;
+      }
+      await api('/api/supplier-purchases', {
+        method: 'POST',
+        body: {
+          supplierId: Number(values.supplierId),
+          invoiceDate: values.invoiceDate,
+          dueDate: values.dueDate,
+          paymentMethod: values.paymentMethod,
+          items: state.buyLines.map((line) => ({
+            productId: line.productId,
+            quantity: Number(line.quantity),
+            cost: line.cost,
+            profit: line.profit,
+            price: line.price,
+          })),
+        },
+      });
+      state.buyLines = [];
+      toast('Compra cargada al inventario.');
+      await render();
+      return;
+    }
+    if (kind === 'expense') {
+      await api('/api/expenses', { method: 'POST', body: values });
+      toast('Gasto anotado.');
       await render();
       return;
     }
@@ -2648,6 +3022,68 @@ async function onClick(event) {
     refreshPosCart();
     return;
   }
+  if (action === 'save-rate') {
+    const rate = document.getElementById('bcv-rate')?.value || '';
+    try {
+      state.bcvRate = (await api('/api/rate', { method: 'PUT', body: { rate } })).rate;
+      toast('Tasa BCV guardada.');
+      const box = document.getElementById('pos-results');
+      if (box) box.innerHTML = buyResultsHtml(document.getElementById('pos-search')?.value || '');
+      refreshPosCart();
+    } catch (error) {
+      toast(error.message, 'bad');
+    }
+    return;
+  }
+  if (action === 'toggle-supplier') {
+    state.supplierOpen = !state.supplierOpen;
+    mount(shell(comprasView()));
+    return;
+  }
+  if (action === 'pick-purchase') {
+    const product = state.products.find((item) => item.id === Number(control.dataset.id));
+    if (!product) return;
+    if (state.buyLines.some((line) => line.productId === product.id)) {
+      toast('Ese producto ya está en la factura.', 'bad');
+      return;
+    }
+    const profit = product.priceCents - product.costCents;
+    state.buyLines.push({
+      productId: product.id,
+      name: product.name,
+      quantity: '1',
+      cost: moneyInput(product.costCents),
+      profit: moneyInput(profit),
+      price: moneyInput(product.priceCents),
+    });
+    const board = document.getElementById('purchase-lines');
+    if (board) board.innerHTML = purchaseLinesHtml();
+    return;
+  }
+  if (action === 'remove-buy-line') {
+    state.buyLines = state.buyLines.filter((line) => line.productId !== Number(control.dataset.id));
+    const board = document.getElementById('purchase-lines');
+    if (board) board.innerHTML = purchaseLinesHtml();
+    return;
+  }
+  if (action === 'stock-move') {
+    const productId = Number(control.dataset.id);
+    const quantity = Number(document.querySelector(`[data-stock-qty="${productId}"]`)?.value);
+    control.disabled = true;
+    try {
+      await api('/api/stock', {
+        method: 'POST',
+        body: { productId, quantity, direction: control.dataset.direction },
+      });
+      toast(control.dataset.direction === 'descarga' ? 'Descarga registrada.' : 'Carga registrada.');
+      state.products = (await api('/api/products')).products;
+      mount(shell(cargasView()));
+    } catch (error) {
+      toast(error.message, 'bad');
+      control.disabled = false;
+    }
+    return;
+  }
   if (action === 'charge-sale') {
     const customerName = document.getElementById('pos-name')?.value.trim() || '';
     if (customerName.length < 2) {
@@ -2662,6 +3098,7 @@ async function onClick(event) {
     const body = new FormData();
     body.set('customerName', customerName);
     body.set('paymentMethod', document.getElementById('pos-pay')?.value || 'efectivo');
+    body.set('currency', state.saleCurrency === 'bs' ? 'bs' : 'usd');
     body.set('items', JSON.stringify(state.cart.map((line) => ({ productId: line.productId, quantity: line.quantity }))));
     const file = document.getElementById('pos-file')?.files?.[0];
     if (file) body.set('file', file);
@@ -3053,9 +3490,51 @@ document.addEventListener('submit', (event) => {
 document.addEventListener('input', (event) => {
   if (event.target.closest('#ticket-form')) updateTotal();
   if (event.target.closest('form[data-form="product"]')) {
+    syncProfitAndPrice(event.target);
     syncPackPrices(event.target);
     updateProductProfit();
     updatePackHint();
+  }
+  const buyField = event.target.closest('#purchase-lines [data-field]');
+  if (buyField) {
+    const row = buyField.closest('[data-line]');
+    const line = state.buyLines.find((item) => item.productId === Number(row?.dataset.line));
+    if (line) {
+      line[buyField.dataset.field] = buyField.value;
+      const cost = centsFromInput(line.cost);
+      if (buyField.dataset.field === 'price' && cost != null) {
+        const price = centsFromInput(line.price);
+        if (price != null) {
+          line.profit = moneyInput(price - cost);
+          const profit = row.querySelector('[data-field="profit"]');
+          if (profit) profit.value = line.profit;
+        }
+      }
+      if ((buyField.dataset.field === 'profit' || buyField.dataset.field === 'cost') && cost != null) {
+        const profit = centsFromInput(line.profit);
+        if (profit != null) {
+          line.price = moneyInput(cost + profit);
+          const price = row.querySelector('[data-field="price"]');
+          if (price) price.value = line.price;
+        }
+      }
+    }
+  }
+  if (event.target.id === 'purchase-search') {
+    const box = document.getElementById('purchase-results');
+    if (box) box.innerHTML = purchaseResultsHtml(event.target.value);
+  }
+  if (event.target.id === 'stock-search') {
+    state.inventoryQuery = event.target.value;
+    const board = document.getElementById('stock-board');
+    if (board) board.innerHTML = stockBoardHtml();
+  }
+  if (event.target.id === 'bcv-rate') {
+    const rate = Number(String(event.target.value || '').trim().replace(/\s/g, '').replace(',', '.'));
+    state.bcvRate = Number.isFinite(rate) && rate > 0 ? rate : 0;
+    const box = document.getElementById('pos-results');
+    if (box) box.innerHTML = buyResultsHtml(document.getElementById('pos-search')?.value || '');
+    refreshPosCart();
   }
   if (event.target.id === 'inventory-search') {
     state.inventoryQuery = event.target.value;
@@ -3098,9 +3577,20 @@ document.addEventListener('change', (event) => {
     return;
   }
   if (event.target.closest('form[data-form="product"]')) {
+    syncProfitAndPrice(event.target);
     syncPackPrices(event.target);
     updatePackHint();
     updateProductProfit();
+  }
+  if (event.target.id === 'pos-currency') {
+    state.saleCurrency = event.target.value === 'bs' ? 'bs' : 'usd';
+    state.cart = state.cart.filter((line) => {
+      const product = state.products.find((item) => item.id === line.productId);
+      return product && acceptsCurrency(product);
+    });
+    const box = document.getElementById('pos-results');
+    if (box) box.innerHTML = buyResultsHtml(document.getElementById('pos-search')?.value || '');
+    refreshPosCart();
   }
   if (event.target.closest('#ticket-form')) updateTotal();
   const payment = event.target.closest('select[data-pay]');

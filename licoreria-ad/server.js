@@ -251,6 +251,58 @@ if (!columnNames('products').includes('units_per_box')) {
 if (!columnNames('products').includes('is_combo')) {
   db.exec('ALTER TABLE products ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0');
 }
+if (!columnNames('products').includes('code')) db.exec('ALTER TABLE products ADD COLUMN code TEXT');
+if (!columnNames('products').includes('department')) db.exec('ALTER TABLE products ADD COLUMN department TEXT');
+if (!columnNames('products').includes('pay_usd')) db.exec('ALTER TABLE products ADD COLUMN pay_usd INTEGER NOT NULL DEFAULT 1');
+if (!columnNames('products').includes('pay_bs')) db.exec('ALTER TABLE products ADD COLUMN pay_bs INTEGER NOT NULL DEFAULT 1');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS suppliers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    document TEXT,
+    phone TEXT,
+    email TEXT,
+    address TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS supplier_purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id INTEGER NOT NULL,
+    invoice_date TEXT NOT NULL,
+    loaded_at TEXT NOT NULL,
+    due_date TEXT,
+    payment_method TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
+  );
+  CREATE TABLE IF NOT EXISTS supplier_purchase_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    purchase_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    product_name TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    cost_cents INTEGER NOT NULL,
+    price_cents INTEGER NOT NULL,
+    FOREIGN KEY (purchase_id) REFERENCES supplier_purchases(id),
+    FOREIGN KEY (product_id) REFERENCES products(id)
+  );
+  CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    bcv_rate REAL NOT NULL DEFAULT 0,
+    spent_at TEXT NOT NULL,
+    note TEXT,
+    user_id INTEGER,
+    created_at TEXT NOT NULL
+  );
+`);
 if (!columnNames('tickets').includes('alias')) db.exec('ALTER TABLE tickets ADD COLUMN alias TEXT');
 if (!columnNames('tickets').includes('payment_method')) db.exec('ALTER TABLE tickets ADD COLUMN payment_method TEXT');
 if (!columnNames('tickets').includes('receipt_file')) db.exec('ALTER TABLE tickets ADD COLUMN receipt_file TEXT');
@@ -289,6 +341,9 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
 `);
+if (!columnNames('invoice_items').includes('cost_cents')) db.exec('ALTER TABLE invoice_items ADD COLUMN cost_cents INTEGER NOT NULL DEFAULT 0');
+if (!columnNames('invoices').includes('currency')) db.exec(`ALTER TABLE invoices ADD COLUMN currency TEXT NOT NULL DEFAULT 'usd'`);
+if (!columnNames('invoices').includes('bcv_rate')) db.exec('ALTER TABLE invoices ADD COLUMN bcv_rate REAL NOT NULL DEFAULT 0');
 if (!columnNames('movements').includes('invoice_id')) {
   db.exec('ALTER TABLE movements ADD COLUMN invoice_id INTEGER');
 }
@@ -369,6 +424,10 @@ if (userCount === 0) {
 }
 
 bootTenant();
+
+function flagOn(value) {
+  return value === true || value === 1 || value === '1';
+}
 
 function toCents(value) {
   const text = String(value ?? '').trim().replace(/\s/g, '').replace(',', '.');
@@ -459,6 +518,10 @@ function presentProduct(row) {
     stockProfitCents: (priceCents - costCents) * stock,
     active: Boolean(row.active),
     isCombo: Boolean(row.is_combo),
+    code: row.code || '',
+    department: row.department || '',
+    payUsd: row.is_combo ? Boolean(row.pay_usd) : true,
+    payBs: row.is_combo ? Boolean(row.pay_bs) : true,
     createdAt: row.created_at,
   };
 }
@@ -495,6 +558,8 @@ function presentCatalog(row) {
     profitCents: base.priceCents - costCents,
     stock: Number.isFinite(available) ? available : 0,
     parts,
+    payUsd: Boolean(row.pay_usd),
+    payBs: Boolean(row.pay_bs),
     stockCostCents: 0,
     stockSaleCents: 0,
     stockProfitCents: 0,
@@ -797,7 +862,7 @@ function asyncRoute(handler) {
   };
 }
 
-const MODULES = ['resumen', 'venta', 'barra', 'inventario', 'ventas', 'movimientos', 'pantallas', 'usuarios'];
+const MODULES = ['resumen', 'venta', 'barra', 'inventario', 'compras', 'cargas', 'gastos', 'ventas', 'movimientos', 'pantallas', 'usuarios'];
 
 function presentSessionUser(user) {
   const known = new Set(MODULES);
@@ -823,7 +888,12 @@ function requireAuth(req, res, next) {
 }
 
 const API_RULES = [
-  { test: /^\/api\/summary$/, modules: ['resumen'] },
+  { test: /^\/api\/summary$/, modules: ['resumen', 'venta'] },
+  { test: /^\/api\/rate$/, modules: ['venta', 'resumen', 'inventario', 'compras', 'gastos'] },
+  { test: /^\/api\/suppliers(\/|$)/, modules: ['compras'] },
+  { test: /^\/api\/supplier-purchases(\/|$)/, modules: ['compras'] },
+  { test: /^\/api\/stock$/, modules: ['cargas', 'inventario'] },
+  { test: /^\/api\/expenses(\/|$)/, modules: ['gastos', 'resumen'] },
   { test: /^\/api\/pos\/sales$/, modules: ['venta'] },
   { test: /^\/api\/invoices\/\d+\/deliver$/, modules: ['barra'] },
   { test: /^\/api\/invoices\/\d+\/refund$/, modules: ['barra'] },
@@ -838,7 +908,8 @@ const API_RULES = [
   { test: /^\/api\/visor\/sales$/, modules: ['visor'] },
   { test: /^\/api\/barra\/sales(\/|$)/, modules: ['barra'] },
   { test: /^\/api\/purchases\/\d+\/refund$/, modules: ['barra'] },
-  { test: /^\/api\/products(\/|$)/, modules: ['inventario'] },
+  { test: /^\/api\/products(\/|$)/, methods: ['POST', 'PATCH', 'DELETE'], modules: ['inventario'] },
+  { test: /^\/api\/products(\/|$)/, modules: ['inventario', 'venta', 'compras', 'cargas'] },
   { test: /^\/api\/combos(\/|$)/, modules: ['inventario'] },
   { test: /^\/api\/purchases\/\d+\/(payment|deliver)$/, modules: ['visor'] },
   { test: /^\/api\/purchases\/\d+\/receipt$/, modules: ['movimientos'] },
@@ -855,7 +926,7 @@ function guardApi(req, res, next) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.user.id);
   if (!user) return res.status(401).json({ error: 'Inicia sesión para continuar.' });
   req.account = presentSessionUser(user);
-  const rule = API_RULES.find((item) => item.test.test(req.path));
+  const rule = API_RULES.find((item) => item.test.test(req.path) && (!item.methods || item.methods.includes(req.method)));
   if (!rule) return res.status(403).json({ error: 'No tienes permiso para esta acción.' });
   if (req.account.isAdmin || rule.modules.some((name) => req.account.permissions.includes(name))) return next();
   return res.status(403).json({ error: 'No tienes permiso para esta acción.' });
@@ -1026,6 +1097,10 @@ if (hosted) app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 app.use(site.session);
 app.use((req, res, next) => {
+  if (hosted && req.secure) req.sessionOptions.secure = true;
+  next();
+});
+app.use((req, res, next) => {
   res.set('Permissions-Policy', 'autoplay=*');
   next();
 });
@@ -1040,15 +1115,38 @@ app.get('/api/public/events', (req, res) => {
   res.json({ events: events.map(presentEvent) });
 });
 
-app.post('/api/login', (req, res) => {
-  const username = String(req.body.username || '').trim();
-  const password = String(req.body.password || '');
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: 'Usuario o contraseña incorrectos.' });
+function passwordMatches(password, hash) {
+  const text = Buffer.isBuffer(hash) ? hash.toString('utf8') : String(hash || '');
+  if (!text.startsWith('$2')) return false;
+  try {
+    return bcrypt.compareSync(password, text);
+  } catch {
+    return false;
   }
-  req.session.user = { id: num(user.id), username: user.username };
-  res.json({ user: presentSessionUser(user) });
+}
+
+app.post('/api/login', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const username = String(body.username || '').trim();
+    const password = String(body.password || '');
+    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    if (!user || !passwordMatches(password, user.password_hash)) {
+      return res.status(401).json({ error: 'Usuario o contraseña incorrectos.' });
+    }
+    req.session.user = { id: num(user.id), username: user.username };
+    res.json({ user: presentSessionUser(user) });
+  } catch (error) {
+    console.error(error);
+    const code = String(error.code || '');
+    if (code === '42P01' || code === '42703') {
+      return res.status(500).json({ error: 'La base de datos de la licorería está incompleta.' });
+    }
+    if (code === '28P01' || code === '57P01' || /connect|terminated|timeout|ECONN/i.test(error.message || '')) {
+      return res.status(500).json({ error: 'No se pudo conectar con la base de datos. Intenta de nuevo.' });
+    }
+    return res.status(500).json({ error: 'Ocurrió un problema interno.' });
+  }
 });
 
 app.post('/api/logout', (req, res) => {
@@ -1057,9 +1155,9 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/me', (req, res) => {
-  if (!req.session.user) return res.status(401).json({ error: 'Inicia sesión para continuar.' });
+  if (!req.session.user) return res.json({ user: null });
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.user.id);
-  if (!user) return res.status(401).json({ error: 'Inicia sesión para continuar.' });
+  if (!user) return res.json({ user: null });
   res.json({ user: presentSessionUser(user) });
 });
 
@@ -1270,6 +1368,8 @@ app.get('/api/products', requireAuth, (req, res) => {
 
 app.post('/api/products', requireAuth, (req, res) => {
   const name = String(req.body.name || '').trim();
+  const code = String(req.body.code || '').trim().slice(0, 40);
+  const department = String(req.body.department || '').trim().slice(0, 60);
   const unitsPerBox = readUnitsPerBox(req.body.unitsPerBox, 1);
   const packed = unitsFromPack(req.body.stock, unitsPerBox, req.body.pack, { min: 0 });
   const costPer = req.body.pack === 'box' ? 'box' : 'unit';
@@ -1291,6 +1391,11 @@ app.post('/api/products', requireAuth, (req, res) => {
     if (priceSplit.error) return res.status(400).json({ error: priceSplit.error });
     priceCents = priceSplit.cents;
   }
+  if ((priceCents == null || req.body.price === '') && req.body.profit != null && req.body.profit !== '') {
+    const profitCents = toCents(req.body.profit);
+    if (profitCents == null) return res.status(400).json({ error: 'Escribe la utilidad, con hasta dos decimales.' });
+    priceCents = costCents + profitCents;
+  }
   if (priceCents == null || priceCents > 10000000) {
     return res.status(400).json({ error: 'Escribe el precio de venta por unidad, con hasta dos decimales.' });
   }
@@ -1298,8 +1403,13 @@ app.post('/api/products', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'El costo por unidad queda demasiado alto.' });
   }
   if (packed.error) return res.status(400).json({ error: packed.error });
-  const info = db.prepare('INSERT INTO products (name, cost_cents, price_cents, stock, units_per_box, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)').run(
+  if (code && db.prepare('SELECT id FROM products WHERE code = ?').get(code)) {
+    return res.status(409).json({ error: 'Ya hay un producto con ese código.' });
+  }
+  const info = db.prepare('INSERT INTO products (name, code, department, cost_cents, price_cents, stock, units_per_box, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)').run(
     name,
+    code || null,
+    department || null,
     costCents,
     priceCents,
     packed.units,
@@ -1355,8 +1465,16 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
     return res.json({ product: presentProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
   }
   const name = req.body.name == null ? current.name : String(req.body.name).trim();
+  const code = req.body.code == null ? (current.code || '') : String(req.body.code).trim().slice(0, 40);
+  const department = req.body.department == null ? (current.department || '') : String(req.body.department).trim().slice(0, 60);
   const costCents = req.body.cost == null ? num(current.cost_cents) : toCents(req.body.cost);
-  const priceCents = req.body.price == null ? num(current.price_cents) : toCents(req.body.price);
+  let priceCents = req.body.price == null || req.body.price === '' ? null : toCents(req.body.price);
+  if (priceCents == null && req.body.profit != null && req.body.profit !== '') {
+    const profitCents = toCents(req.body.profit);
+    if (profitCents == null || costCents == null) return res.status(400).json({ error: 'Escribe la utilidad, con hasta dos decimales.' });
+    priceCents = costCents + profitCents;
+  }
+  if (priceCents == null) priceCents = num(current.price_cents);
   const stock = req.body.stock == null ? num(current.stock) : wholeNumber(req.body.stock, 0, 1000000);
   const unitsPerBox = req.body.unitsPerBox == null ? Math.max(1, num(current.units_per_box) || 1) : readUnitsPerBox(req.body.unitsPerBox, null);
   const active = req.body.active == null ? Boolean(current.active) : Boolean(req.body.active);
@@ -1372,7 +1490,10 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
   if (unitsPerBox == null) return res.status(400).json({ error: 'Las unidades por caja tienen que ser un número entero entre 1 y 10000.' });
   if (stock == null) return res.status(400).json({ error: 'Las existencias tienen que ser un número entero entre 0 y 1000000.' });
   const delta = stock - num(current.stock);
-  db.prepare('UPDATE products SET name = ?, cost_cents = ?, price_cents = ?, stock = ?, units_per_box = ?, active = ? WHERE id = ?').run(name, costCents, priceCents, stock, unitsPerBox, active ? 1 : 0, id);
+  if (code && db.prepare('SELECT id FROM products WHERE code = ? AND id <> ?').get(code, id)) {
+    return res.status(409).json({ error: 'Ya hay un producto con ese código.' });
+  }
+  db.prepare('UPDATE products SET name = ?, code = ?, department = ?, cost_cents = ?, price_cents = ?, stock = ?, units_per_box = ?, active = ? WHERE id = ?').run(name, code || null, department || null, costCents, priceCents, stock, unitsPerBox, active ? 1 : 0, id);
   if (delta !== 0) {
     logMovement({
       kind: delta > 0 ? 'entrada' : 'ajuste',
@@ -1423,10 +1544,13 @@ app.post('/api/combos', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'Escribe el precio de venta del combo, con hasta dos decimales.' });
   }
   if (recipe.error) return res.status(400).json({ error: recipe.error });
+  const payUsd = req.body.payUsd == null ? true : Boolean(req.body.payUsd);
+  const payBs = req.body.payBs == null ? false : Boolean(req.body.payBs);
+  if (!payUsd && !payBs) return res.status(400).json({ error: 'Elige al menos una moneda para el combo: dólares o bolívares.' });
   const info = db.prepare(`
-    INSERT INTO products (name, cost_cents, price_cents, stock, units_per_box, active, is_combo, created_at)
-    VALUES (?, 0, ?, 0, 1, ?, 1, ?)
-  `).run(name, priceCents, active ? 1 : 0, new Date().toISOString());
+    INSERT INTO products (name, cost_cents, price_cents, stock, units_per_box, active, is_combo, pay_usd, pay_bs, created_at)
+    VALUES (?, 0, ?, 0, 1, ?, 1, ?, ?, ?)
+  `).run(name, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, new Date().toISOString());
   const id = num(info.lastInsertRowid);
   saveComboParts(id, recipe.parts);
   res.status(201).json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
@@ -1451,7 +1575,10 @@ app.patch('/api/combos/:id', requireAuth, (req, res) => {
     if (recipe.error) return res.status(400).json({ error: recipe.error });
     parts = recipe.parts;
   }
-  db.prepare('UPDATE products SET name = ?, price_cents = ?, active = ? WHERE id = ?').run(name, priceCents, active ? 1 : 0, id);
+  const payUsd = req.body.payUsd == null ? Boolean(current.pay_usd) : Boolean(req.body.payUsd);
+  const payBs = req.body.payBs == null ? Boolean(current.pay_bs) : Boolean(req.body.payBs);
+  if (!payUsd && !payBs) return res.status(400).json({ error: 'Elige al menos una moneda para el combo: dólares o bolívares.' });
+  db.prepare('UPDATE products SET name = ?, price_cents = ?, active = ?, pay_usd = ?, pay_bs = ? WHERE id = ?').run(name, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, id);
   if (parts) saveComboParts(id, parts);
   res.json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
 });
@@ -1830,6 +1957,9 @@ function loadInvoice(id) {
     refundedAt: invoice.refunded_at || null,
     hasReceipt: Boolean(invoice.receipt_file),
     totalCents: items.reduce((sum, item) => sum + item.totalCents, 0),
+    currency: invoice.currency || 'usd',
+    bcvRate: Number(invoice.bcv_rate) || 0,
+    totalBsCents: Math.round(items.reduce((sum, item) => sum + item.totalCents, 0) * (Number(invoice.bcv_rate) || 0)),
     items,
   };
 }
@@ -1922,6 +2052,12 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: 'Elige el método de pago.' });
   }
+  const currency = req.body.currency === 'bs' ? 'bs' : 'usd';
+  const bcvRate = currentRate();
+  if (currency === 'bs' && bcvRate <= 0) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: 'Coloca la tasa BCV antes de cobrar en bolívares.' });
+  }
   let lines;
   let consumption;
   try {
@@ -1932,12 +2068,12 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     throw error;
   }
   const insertInvoice = db.prepare(`
-    INSERT INTO invoices (number, code, customer_name, payment_method, receipt_file, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO invoices (number, code, customer_name, payment_method, currency, bcv_rate, receipt_file, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertItem = db.prepare(`
-    INSERT INTO invoice_items (invoice_id, product_id, product_name, unit_price_cents, quantity, delivered)
-    VALUES (?, ?, ?, ?, ?, 0)
+    INSERT INTO invoice_items (invoice_id, product_id, product_name, unit_price_cents, cost_cents, quantity, delivered)
+    VALUES (?, ?, ?, ?, ?, ?, 0)
   `);
   const takeStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND active = 1 AND is_combo = 0 AND stock >= ?');
   let invoiceId = 0;
@@ -1952,7 +2088,13 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     const number = num(db.prepare('SELECT COALESCE(MAX(number), 0) AS n FROM invoices').get().n) + 1;
     let code = newCode();
     while (db.prepare('SELECT id FROM invoices WHERE code = ?').get(code)) code = newCode();
-    const info = insertInvoice.run(number, code, customerName, paymentMethod, req.file?.filename || null, new Date().toISOString());
+    for (const line of lines) {
+      const allowUsd = line.product.is_combo ? flagOn(line.product.pay_usd) : true;
+      const allowBs = line.product.is_combo ? flagOn(line.product.pay_bs) : true;
+      if (currency === 'usd' && !allowUsd) throw httpError(400, `${line.product.name} no se cobra en dólares.`);
+      if (currency === 'bs' && !allowBs) throw httpError(400, `${line.product.name} no se cobra en bolívares.`);
+    }
+    const info = insertInvoice.run(number, code, customerName, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString());
     invoiceId = num(info.lastInsertRowid);
     for (const [productId, quantity] of consumption) {
       const taken = takeStock.run(quantity, productId, quantity);
@@ -1962,7 +2104,10 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
       }
     }
     for (const line of lines) {
-      insertItem.run(invoiceId, line.product.id, line.product.name, num(line.product.price_cents), line.quantity);
+      const costCents = line.product.is_combo
+        ? num(db.prepare(`SELECT COALESCE(SUM(ci.quantity * p.cost_cents), 0) AS n FROM combo_items ci JOIN products p ON p.id = ci.product_id WHERE ci.combo_id = ?`).get(line.product.id).n)
+        : num(line.product.cost_cents);
+      insertItem.run(invoiceId, line.product.id, line.product.name, num(line.product.price_cents), costCents, line.quantity);
       logMovement({
         kind: 'venta',
         productId: num(line.product.id),
@@ -2033,6 +2178,9 @@ app.get('/api/public/invoices/:code', (req, res) => {
       createdAt: sale.createdAt,
       refundedAt: sale.refundedAt,
       totalCents: sale.totalCents,
+      currency: sale.currency,
+      bcvRate: sale.bcvRate,
+      totalBsCents: sale.totalBsCents,
       items: sale.items.map((item) => ({
         id: item.id,
         productName: item.productName,
@@ -2159,31 +2307,304 @@ app.get('/api/invoices/:id/receipt', requireAuth, (req, res) => {
   res.sendFile(path.join(activeTenant().receiptDir, path.basename(invoice.receipt_file)));
 });
 
+function currentRate() {
+  const row = db.prepare(`SELECT value FROM settings WHERE key = 'bcv_rate'`).get();
+  const rate = Number(String(row?.value || '').replace(',', '.'));
+  return Number.isFinite(rate) && rate > 0 ? rate : 0;
+}
+
+function readRateInput(value) {
+  const rate = Number(String(value ?? '').trim().replace(/\s/g, '').replace(',', '.'));
+  if (!Number.isFinite(rate) || rate <= 0 || rate > 1000000) return null;
+  return Math.round(rate * 10000) / 10000;
+}
+
+app.get('/api/rate', requireAuth, (req, res) => {
+  res.json({ rate: currentRate() });
+});
+
+app.put('/api/rate', requireAuth, (req, res) => {
+  const rate = readRateInput(req.body.rate);
+  if (rate == null) return res.status(400).json({ error: 'Escribe la tasa BCV, con hasta cuatro decimales.' });
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('bcv_rate', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(rate));
+  res.json({ rate });
+});
+
+function presentSupplier(row) {
+  return {
+    id: num(row.id),
+    name: row.name,
+    document: row.document || '',
+    phone: row.phone || '',
+    email: row.email || '',
+    address: row.address || '',
+    notes: row.notes || '',
+    createdAt: row.created_at,
+  };
+}
+
+app.get('/api/suppliers', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM suppliers ORDER BY name COLLATE NOCASE').all();
+  res.json({ suppliers: rows.map(presentSupplier) });
+});
+
+app.post('/api/suppliers', requireAuth, (req, res) => {
+  const name = String(req.body.name || '').trim().slice(0, 80);
+  if (name.length < 2) return res.status(400).json({ error: 'Escribe el nombre del proveedor.' });
+  const info = db.prepare(`
+    INSERT INTO suppliers (name, document, phone, email, address, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    name,
+    String(req.body.document || '').trim().slice(0, 40) || null,
+    String(req.body.phone || '').trim().slice(0, 40) || null,
+    String(req.body.email || '').trim().slice(0, 80) || null,
+    String(req.body.address || '').trim().slice(0, 160) || null,
+    String(req.body.notes || '').trim().slice(0, 240) || null,
+    new Date().toISOString(),
+  );
+  res.status(201).json({ supplier: presentSupplier(db.prepare('SELECT * FROM suppliers WHERE id = ?').get(num(info.lastInsertRowid))) });
+});
+
+app.get('/api/supplier-purchases', requireAuth, (req, res) => {
+  const rows = db.prepare(`
+    SELECT sp.*, s.name AS supplier_name
+    FROM supplier_purchases sp
+    JOIN suppliers s ON s.id = sp.supplier_id
+    ORDER BY sp.created_at DESC, sp.id DESC
+    LIMIT 40
+  `).all();
+  res.json({
+    purchases: rows.map((row) => {
+      const items = db.prepare('SELECT * FROM supplier_purchase_items WHERE purchase_id = ? ORDER BY id').all(row.id);
+      return {
+        id: num(row.id),
+        supplierName: row.supplier_name,
+        invoiceDate: row.invoice_date,
+        loadedAt: row.loaded_at,
+        dueDate: row.due_date || '',
+        paymentMethod: row.payment_method,
+        totalCents: items.reduce((sum, item) => sum + num(item.cost_cents) * num(item.quantity), 0),
+        items: items.map((item) => ({
+          productName: item.product_name,
+          quantity: num(item.quantity),
+          costCents: num(item.cost_cents),
+          priceCents: num(item.price_cents),
+        })),
+      };
+    }),
+  });
+});
+
+app.post('/api/supplier-purchases', requireAuth, (req, res) => {
+  const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(Number(req.body.supplierId));
+  if (!supplier) return res.status(400).json({ error: 'Elige el proveedor.' });
+  const invoiceDate = String(req.body.invoiceDate || '').trim();
+  if (!parseDay(invoiceDate)) return res.status(400).json({ error: 'Escribe la fecha de la factura.' });
+  const dueDate = String(req.body.dueDate || '').trim();
+  if (dueDate && !parseDay(dueDate)) return res.status(400).json({ error: 'Revisa la fecha de vencimiento.' });
+  const paymentMethod = String(req.body.paymentMethod || '');
+  if (!PAYMENTS.has(paymentMethod)) return res.status(400).json({ error: 'Elige el método de pago.' });
+  if (!Array.isArray(req.body.items) || !req.body.items.length) return res.status(400).json({ error: 'Agrega al menos un producto.' });
+  const lines = [];
+  for (const raw of req.body.items) {
+    const product = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 0').get(Number(raw?.productId));
+    const quantity = wholeNumber(raw?.quantity, 1, 100000);
+    const costCents = toCents(raw?.cost);
+    let priceCents = raw?.price == null || raw?.price === '' ? null : toCents(raw.price);
+    if (priceCents == null && raw?.profit != null && raw.profit !== '') {
+      const profitCents = toCents(raw.profit);
+      if (profitCents != null && costCents != null) priceCents = costCents + profitCents;
+    }
+    if (!product || quantity == null || costCents == null || priceCents == null) {
+      return res.status(400).json({ error: 'Revisa el producto, la cantidad, el costo y el precio de venta.' });
+    }
+    lines.push({ product, quantity, costCents, priceCents });
+  }
+  const loadedAt = new Date().toISOString();
+  const insert = db.prepare(`
+    INSERT INTO supplier_purchases (supplier_id, invoice_date, loaded_at, due_date, payment_method, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const insertItem = db.prepare(`
+    INSERT INTO supplier_purchase_items (purchase_id, product_id, product_name, quantity, cost_cents, price_cents)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  db.exec('BEGIN');
+  let purchaseId = 0;
+  try {
+    const info = insert.run(supplier.id, invoiceDate, loadedAt, dueDate || null, paymentMethod, loadedAt);
+    purchaseId = num(info.lastInsertRowid);
+    for (const line of lines) {
+      insertItem.run(purchaseId, line.product.id, line.product.name, line.quantity, line.costCents, line.priceCents);
+      db.prepare('UPDATE products SET stock = stock + ?, cost_cents = ?, price_cents = ? WHERE id = ?').run(line.quantity, line.costCents, line.priceCents, line.product.id);
+      logMovement({
+        kind: 'carga',
+        productId: num(line.product.id),
+        productName: line.product.name,
+        quantity: line.quantity,
+        unitPriceCents: line.costCents,
+        userId: req.account?.id,
+        note: `Compra ${supplier.name}`,
+      });
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* la transacción ya se cerró */ }
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
+  res.status(201).json({ id: purchaseId });
+});
+
+app.post('/api/stock', requireAuth, (req, res) => {
+  const direction = req.body.direction === 'descarga' ? 'descarga' : 'carga';
+  const product = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 0').get(Number(req.body.productId));
+  const quantity = wholeNumber(req.body.quantity, 1, 100000);
+  if (!product || quantity == null) return res.status(400).json({ error: 'Elige un producto y una cantidad.' });
+  if (direction === 'descarga' && num(product.stock) < quantity) {
+    return res.status(400).json({ error: `No puedes descargar más de lo que hay. Quedan ${num(product.stock)}.` });
+  }
+  if (direction === 'carga') db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(quantity, product.id);
+  else db.prepare('UPDATE products SET stock = stock - ? WHERE id = ?').run(quantity, product.id);
+  logMovement({
+    kind: direction,
+    productId: num(product.id),
+    productName: product.name,
+    quantity,
+    unitPriceCents: num(product.cost_cents),
+    userId: req.account?.id,
+    note: direction === 'carga' ? 'Carga manual' : 'Descarga manual',
+  });
+  res.json({ product: presentProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(product.id)) });
+});
+
+app.get('/api/expenses', requireAuth, (req, res) => {
+  let range;
+  try {
+    range = rangeFor(String(req.query.preset || 'month'), req.query.from, req.query.to);
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
+  const rows = db.prepare('SELECT * FROM expenses WHERE spent_at >= ? AND spent_at < ? ORDER BY spent_at DESC, id DESC').all(range.from.toISOString(), range.to.toISOString());
+  res.json({
+    expenses: rows.map((row) => ({
+      id: num(row.id),
+      description: row.description,
+      amountCents: num(row.amount_cents),
+      currency: row.currency,
+      bcvRate: Number(row.bcv_rate) || 0,
+      spentAt: row.spent_at,
+      note: row.note || '',
+    })),
+  });
+});
+
+app.post('/api/expenses', requireAuth, (req, res) => {
+  const description = String(req.body.description || '').trim().slice(0, 120);
+  const amountCents = toCents(req.body.amount);
+  const currency = req.body.currency === 'bs' ? 'bs' : 'usd';
+  const day = parseDay(String(req.body.date || ''));
+  if (description.length < 2) return res.status(400).json({ error: 'Escribe el gasto.' });
+  if (amountCents == null || amountCents <= 0) return res.status(400).json({ error: 'Escribe el monto del gasto.' });
+  if (!day) return res.status(400).json({ error: 'Elige la fecha del gasto.' });
+  const rate = currentRate();
+  if (currency === 'bs' && rate <= 0) return res.status(400).json({ error: 'Coloca la tasa BCV antes de anotar un gasto en bolívares.' });
+  const info = db.prepare(`
+    INSERT INTO expenses (description, amount_cents, currency, bcv_rate, spent_at, note, user_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(description, amountCents, currency, rate, day.toISOString(), String(req.body.note || '').trim().slice(0, 240) || null, req.account?.id || null, new Date().toISOString());
+  res.status(201).json({ id: num(info.lastInsertRowid) });
+});
+
 app.get('/api/summary', requireAuth, (req, res) => {
-  const today = rangeFor('day');
-  const month = rangeFor('month');
-  const countBetween = (from, to) => num(db.prepare(`
-    SELECT COUNT(*) AS n FROM invoices
-    WHERE refunded_at IS NULL AND created_at >= ? AND created_at < ?
-  `).get(from, to).n);
-  const moneyBetween = (from, to) => num(db.prepare(`
-    SELECT COALESCE(SUM(ii.quantity * ii.unit_price_cents), 0) AS n
-    FROM invoice_items ii
-    JOIN invoices i ON i.id = ii.invoice_id
+  const preset = String(req.query.preset || 'day');
+  let range;
+  try {
+    range = rangeFor(preset === 'hour' ? 'day' : preset, req.query.from, req.query.to);
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
+  const lines = db.prepare(`
+    SELECT i.id, i.payment_method, i.bcv_rate, i.created_at,
+           ii.quantity, ii.unit_price_cents, ii.cost_cents
+    FROM invoices i
+    JOIN invoice_items ii ON ii.invoice_id = i.id
     WHERE i.refunded_at IS NULL AND i.created_at >= ? AND i.created_at < ?
-  `).get(from, to).n);
+  `).all(range.from.toISOString(), range.to.toISOString());
+  const invoiceIds = new Set();
+  const payments = new Map();
+  let salesCents = 0;
+  let costCents = 0;
+  for (const line of lines) {
+    const quantity = num(line.quantity);
+    const revenue = quantity * num(line.unit_price_cents);
+    const cost = quantity * num(line.cost_cents);
+    const rate = Number(line.bcv_rate) || 0;
+    salesCents += revenue;
+    costCents += cost;
+    invoiceIds.add(num(line.id));
+    const bucket = payments.get(line.payment_method) || { method: line.payment_method, countIds: new Set(), salesCents: 0, salesBs: 0 };
+    bucket.countIds.add(num(line.id));
+    bucket.salesCents += revenue;
+    bucket.salesBs += Math.round(revenue * rate);
+    payments.set(line.payment_method, bucket);
+  }
+  const salesBs = lines.reduce((sum, line) => sum + Math.round(num(line.quantity) * num(line.unit_price_cents) * (Number(line.bcv_rate) || 0)), 0);
+  const costBs = lines.reduce((sum, line) => sum + Math.round(num(line.quantity) * num(line.cost_cents) * (Number(line.bcv_rate) || 0)), 0);
+  const expenseRows = db.prepare('SELECT * FROM expenses WHERE spent_at >= ? AND spent_at < ?').all(range.from.toISOString(), range.to.toISOString());
+  let expensesCents = 0;
+  let expensesBs = 0;
+  for (const expense of expenseRows) {
+    const amount = num(expense.amount_cents);
+    const rate = Number(expense.bcv_rate) || currentRate();
+    if (expense.currency === 'bs') {
+      expensesBs += amount;
+      expensesCents += rate > 0 ? Math.round(amount / rate) : 0;
+    } else {
+      expensesCents += amount;
+      expensesBs += Math.round(amount * rate);
+    }
+  }
+  const grain = preset === 'hour' || preset === 'day' ? 'hour' : 'day';
+  const buckets = new Map();
+  if (grain === 'hour') {
+    for (let hour = 0; hour < 24; hour += 1) buckets.set(String(hour), { label: String(hour).padStart(2, '0'), salesCents: 0, salesBs: 0 });
+  }
+  for (const line of lines) {
+    const date = new Date(line.created_at);
+    const key = grain === 'hour' ? String(date.getHours()) : ymd(date);
+    if (!buckets.has(key) && grain === 'day') buckets.set(key, { label: String(date.getDate()), salesCents: 0, salesBs: 0 });
+    const bucket = buckets.get(key);
+    if (!bucket) continue;
+    const revenue = num(line.quantity) * num(line.unit_price_cents);
+    bucket.salesCents += revenue;
+    bucket.salesBs += Math.round(revenue * (Number(line.bcv_rate) || 0));
+  }
   const pending = num(db.prepare(`
     SELECT COALESCE(SUM(ii.quantity - ii.delivered), 0) AS n
-    FROM invoice_items ii
-    JOIN invoices i ON i.id = ii.invoice_id
+    FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
     WHERE i.refunded_at IS NULL
   `).get().n);
   const recent = db.prepare('SELECT id FROM invoices ORDER BY created_at DESC, id DESC LIMIT 6').all().map((row) => loadInvoice(num(row.id)));
   res.json({
-    salesToday: countBetween(today.from.toISOString(), today.to.toISOString()),
-    revenueToday: moneyBetween(today.from.toISOString(), today.to.toISOString()),
-    revenueMonth: moneyBetween(month.from.toISOString(), month.to.toISOString()),
+    preset: preset === 'hour' ? 'hour' : preset,
+    from: ymd(range.from),
+    to: ymd(new Date(range.to.getTime() - 1)),
+    label: formatRange(range.from, range.to),
+    rate: currentRate(),
+    invoices: invoiceIds.size,
+    salesCents,
+    costCents,
+    profitCents: salesCents - costCents,
+    salesBs,
+    costBs,
+    profitBs: salesBs - costBs,
+    expensesCents,
+    expensesBs,
     pending,
+    payments: [...payments.values()].map((row) => ({ method: row.method, count: row.countIds.size, salesCents: row.salesCents, salesBs: row.salesBs })),
+    series: [...buckets.values()],
     recent,
   });
 });
@@ -2278,7 +2699,7 @@ app.get('/api/sales', requireAuth, (req, res) => {
     SELECT DISTINCT event_name AS name
     FROM tickets
     WHERE created_at >= ? AND created_at < ?
-    ORDER BY event_name COLLATE NOCASE
+    ORDER BY 1
   `).all(range.from.toISOString(), range.to.toISOString()).map((row) => row.name);
   let sql = 'SELECT * FROM tickets WHERE created_at >= ? AND created_at < ?';
   if (query) {
@@ -2324,7 +2745,7 @@ app.get('/api/movements', requireAuth, (req, res) => {
       return res.status(error.status || 400).json({ error: error.message });
     }
   }
-  const kind = ['entrada', 'venta', 'ajuste', 'devolucion'].includes(req.query.kind) ? req.query.kind : '';
+  const kind = ['entrada', 'venta', 'ajuste', 'devolucion', 'carga', 'descarga'].includes(req.query.kind) ? req.query.kind : '';
   const query = String(req.query.q || '').trim().slice(0, 80);
   const params = [];
   let where = 'WHERE 1 = 1';

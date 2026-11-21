@@ -12,17 +12,34 @@ const pool = ownSchema ? null : new pg.Pool({
   max: 4,
   connectionTimeoutMillis: 60000,
 });
-const schemaClient = ownSchema ? new pg.Client({
-  connectionString,
-  ssl: needsSsl ? { rejectUnauthorized: false } : false,
-  connectionTimeoutMillis: 60000,
-}) : null;
-const schemaReady = schemaClient
-  ? schemaClient.connect().then(async () => {
-    await schemaClient.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
-    await schemaClient.query(`SET search_path TO ${schema}`);
-  })
-  : null;
+let schemaClient = null;
+let schemaReady = Promise.resolve();
+let closing = false;
+
+function openSchemaClient() {
+  const client = new pg.Client({
+    connectionString,
+    ssl: needsSsl ? { rejectUnauthorized: false } : false,
+    connectionTimeoutMillis: 60000,
+    keepAlive: true,
+  });
+  client.on('error', () => {
+    if (closing || schemaClient !== client) return;
+    schemaClient = null;
+    schemaReady = openSchemaClient();
+  });
+  schemaClient = client;
+  return client.connect().then(async () => {
+    await client.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+    await client.query(`SET search_path TO ${schema}`);
+    return client;
+  }).catch((error) => {
+    if (schemaClient === client) schemaClient = null;
+    throw error;
+  });
+}
+
+if (ownSchema) schemaReady = openSchemaClient();
 pg.types.setTypeParser(20, (value) => Number(value));
 
 let tx = null;
@@ -58,6 +75,7 @@ function splitSql(sql) {
 async function runOne(sql, params) {
   const trimmed = String(sql || '').trim();
   if (ownSchema) {
+    if (!schemaClient) schemaReady = openSchemaClient();
     await schemaReady;
     if (/^BEGIN\b/i.test(trimmed)) {
       await schemaClient.query('BEGIN');
@@ -124,6 +142,7 @@ async function handle(message) {
 parentPort.on('message', async (message) => {
   if (message.op === 'close') {
     if (tx) tx.release();
+    closing = true;
     if (schemaClient) await schemaClient.end();
     if (pool) await pool.end();
     message.port.postMessage({ ok: true });
@@ -134,6 +153,6 @@ parentPort.on('message', async (message) => {
     message.port.postMessage({ ok: true, result });
   } catch (error) {
     const unique = error.code === '23505' ? `UNIQUE ${error.message}` : error.message;
-    message.port.postMessage({ ok: false, error: unique });
+    message.port.postMessage({ ok: false, error: unique, code: error.code || '' });
   }
 });

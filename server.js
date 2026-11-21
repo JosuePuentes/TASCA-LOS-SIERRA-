@@ -1909,11 +1909,11 @@ app.use('/api', (req, res) => {
 });
 
 app.use('/media', express.static(mediaDir, { maxAge: '1h', index: false, fallthrough: false }));
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: true }));
+app.use(express.static(path.join(__dirname, 'site'), { maxAge: 0, etag: true }));
 app.use((req, res) => {
   if (req.method !== 'GET') return res.status(404).type('text').send('No encontrado.');
   res.set('Cache-Control', 'no-store');
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'site', 'index.html'));
 });
 
 app.use((error, req, res, next) => {

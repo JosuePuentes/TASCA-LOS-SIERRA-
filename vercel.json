@@ -5,7 +5,7 @@
   ],
   "functions": {
     "api/index.js": {
-      "includeFiles": "{public,licoreria-ad}/**",
+      "includeFiles": "{site,licoreria-ad}/**",
       "maxDuration": 30
     }
   },

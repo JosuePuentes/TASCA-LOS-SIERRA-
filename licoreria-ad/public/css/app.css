@@ -558,6 +558,13 @@ body.nav-open { overflow: hidden; }
 }
 .public .note-strip p { color: #d5e4f7; }
 .public .section { background: #070712; }
+.public input,
+.public select,
+.public textarea {
+  color: #241812;
+  caret-color: #241812;
+  background: #fff;
+}
 .public .lead { color: #9eb0c8; }
 .public .event-card,
 .public .empty {

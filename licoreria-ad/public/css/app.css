@@ -838,6 +838,8 @@ html[data-negocio="licoreria-ad"] .shell.night .side-btn:hover { color: #e7c27a;
 }
 .quick-tile span { color: #9eb0c8; font-size: 12px; }
 .quick-tile:disabled { opacity: 0.45; }
+.cart-qty { width: 96px; margin: 0; flex: none; }
+.cart-qty input { width: 96px; }
 .sale-hit {
   display: flex;
   flex-direction: column;

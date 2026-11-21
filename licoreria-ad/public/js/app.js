@@ -544,7 +544,7 @@ function dashboardView() {
       <article class="stat"><p class="stat-label">Ventas en bolívares</p><p class="stat-value">${moneyBs(dash.salesBs || 0)}</p></article>
       <article class="stat"><p class="stat-label">Costo en bolívares</p><p class="stat-value">${moneyBs(dash.costBs || 0)}</p></article>
       <article class="stat"><p class="stat-label">Utilidad en bolívares</p><p class="stat-value">${moneyBs(dash.profitBs || 0)}</p></article>
-      <article class="stat"><p class="stat-label">Por entregar</p><p class="stat-value">${dash.pending || 0}</p></article>
+      <article class="stat"><p class="stat-label">Unidades por entregar</p><p class="stat-value">${Number(dash.pending || 0).toLocaleString('es-ES')}</p></article>
     </div>
     <div class="grid-stats thirds">
       <article class="stat"><p class="stat-label">Gastos en dólares</p><p class="stat-value">${money(dash.expensesCents || 0)}</p></article>
@@ -968,6 +968,7 @@ function productListHtml() {
               <option value="box">Caja${product.unitsPerBox > 1 ? ` de ${product.unitsPerBox}` : ''}</option>
             </select>
             <button class="btn ghost small" type="button" data-action="add-stock" data-id="${product.id}">Sumar</button>
+            <label class="btn ghost small file-btn">${product.imageUrl ? 'Cambiar imagen' : 'Cargar imagen'}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" data-product-image="${product.id}"></label>
             <button class="btn ghost small" type="button" data-action="edit-product" data-id="${product.id}">Editar</button>
             <button class="btn ghost small" type="button" data-action="toggle-product" data-id="${product.id}" data-active="${product.active ? '1' : '0'}">${product.active ? 'Desactivar' : 'Activar'}</button>
             <button class="btn danger small" type="button" data-action="delete-product" data-id="${product.id}">Eliminar</button>
@@ -1025,7 +1026,7 @@ function inventoryView() {
       </form>
       <section>
         <h2>Inventario</h2>
-        <p class="lead page-lead">Estos números salen de los productos que cargues. Al facturar en un QR, se restan las existencias.</p>
+        <p class="lead page-lead">En cada producto puedes cargar una imagen. Esa foto queda en la búsqueda rápida de Venta.</p>
         <div class="grid-stats thirds">
           <article class="stat"><p class="stat-label">Costo del inventario</p><p class="stat-value">${money(costValue)}</p></article>
           <article class="stat"><p class="stat-label">Valor de venta</p><p class="stat-value">${money(saleValue)}</p></article>
@@ -1053,6 +1054,7 @@ function inventoryView() {
           <label class="check"><input name="payUsd" type="checkbox" ${combo ? (combo.payUsd ? 'checked' : '') : 'checked'}><span>Se cobra en dólares</span></label>
           <label class="check"><input name="payBs" type="checkbox" ${combo ? (combo.payBs ? 'checked' : '') : 'checked'}><span>Se cobra en bolívares</span></label>
           <label class="check"><input name="active" type="checkbox" ${combo ? (combo.active ? 'checked' : '') : 'checked'}><span>Disponible para vender</span></label>
+          <label class="check"><input name="quickSale" type="checkbox" ${combo?.quickSale ? 'checked' : ''}><span>Mostrar en la venta rápida</span></label>
           <p class="form-error" hidden></p>
           <div class="row-actions">
             <button class="btn primary" type="submit">${combo ? 'Guardar combo' : 'Crear combo'}</button>
@@ -1123,12 +1125,13 @@ function comboListHtml(combos) {
     return `<article class="event-row ${item.active ? '' : 'inactive'}">
       <div>
         <h3>${item.code ? `${esc(item.code)} · ` : ''}${esc(item.name)}</h3>
-        <p class="price-line">Venta ${money(item.priceCents)} · Costo ${money(item.costCents)} · Utilidad ${money(item.profitCents)} · ${[item.payUsd ? 'dólares' : '', item.payBs ? 'bolívares' : ''].filter(Boolean).join(' y ') || 'sin moneda'} · ${item.active ? 'A la venta' : 'Inactivo'}</p>
+        <p class="price-line">Venta ${money(item.priceCents)} · Costo ${money(item.costCents)} · Utilidad ${money(item.profitCents)} · ${[item.payUsd ? 'dólares' : '', item.payBs ? 'bolívares' : ''].filter(Boolean).join(' y ') || 'sin moneda'} · ${item.quickSale ? 'En venta rápida · ' : ''}${item.active ? 'A la venta' : 'Inactivo'}</p>
         <p class="price-line">${recipe}</p>
         <p class="hint">${item.stock > 0 ? `Alcanzan ${item.stock.toLocaleString('es-ES')} combos` : 'No alcanzan las unidades para vender uno'}</p>
       </div>
       <div class="row-actions">
         <button class="btn ghost small" type="button" data-action="edit-combo" data-id="${item.id}">Editar</button>
+        <button class="btn ghost small" type="button" data-action="toggle-quick" data-id="${item.id}" data-quick="${item.quickSale ? '1' : '0'}">${item.quickSale ? 'Quitar de venta rápida' : 'Mostrar en venta rápida'}</button>
         <button class="btn ghost small" type="button" data-action="toggle-product" data-id="${item.id}" data-active="${item.active ? '1' : '0'}">${item.active ? 'Desactivar' : 'Activar'}</button>
         <button class="btn danger small" type="button" data-action="delete-combo" data-id="${item.id}">Eliminar</button>
       </div>
@@ -1247,15 +1250,15 @@ function buyResultsHtml(query) {
 }
 
 function quickSaleHtml() {
-  const products = state.products.filter((product) => product.quickSale && product.active && !product.isCombo && acceptsCurrency(product));
-  if (!products.length) return '<p class="hint">En inventario marca los productos que quieres ver aquí y ponles una imagen.</p>';
+  const products = state.products.filter((product) => product.quickSale && product.active && acceptsCurrency(product));
+  if (!products.length) return '<p class="hint">En inventario marca los productos y los combos que quieres ver aquí.</p>';
   return `<div class="quick-grid">${products.map((product) => {
-    const choices = combosForProduct(product);
+    const choices = product.isCombo ? [] : combosForProduct(product);
     const canSell = product.stock > 0 || choices.some((item) => item.stock > 0);
     return `
       <button class="quick-tile" type="button" data-action="${choices.length ? 'open-sale-choice' : 'pick-product'}" data-id="${product.id}" ${canSell ? '' : 'disabled'}>
         ${productThumb(product, 'quick-photo')}
-        <strong>${esc(product.name)}</strong>
+        <strong>${product.isCombo ? 'Combo · ' : ''}${esc(product.name)}</strong>
         <span>${displayMoney(product.priceCents)}${choices.length ? ` · ${choices.length} combos` : ''}</span>
       </button>`;
   }).join('')}</div>`;
@@ -1289,10 +1292,66 @@ function saleChoiceModal(product) {
 function cartLinesHtml() {
   if (!state.cart.length) return `<p class="hint">Todavía no agregas productos a esta compra.</p>`;
   return state.cart.map((line) => `
-    <div class="balance">
-      <div><strong>${esc(line.name)}</strong><p class="hint">${line.quantity} · ${displayMoney(line.priceCents * line.quantity)}</p></div>
+    <div class="balance" data-cart-line="${line.productId}">
+      <div>
+        <strong>${esc(line.name)}</strong>
+        <p class="hint" data-cart-math>${line.quantity} · ${displayMoney(line.priceCents * line.quantity)}</p>
+      </div>
+      <label class="field cart-qty"><span>Cantidad</span><input data-cart-qty="${line.productId}" type="number" min="1" max="500" value="${line.quantity}"></label>
       <button class="btn ghost small" type="button" data-action="remove-cart" data-id="${line.productId}">Quitar</button>
     </div>`).join('');
+}
+
+function cartRoom(product, line) {
+  const current = line?.quantity || 0;
+  if (!product) return 0;
+  if (product.isCombo) {
+    let room = 500;
+    for (const part of product.parts || []) {
+      const source = state.products.find((item) => item.id === part.productId);
+      const used = reservedUnits(part.productId) - part.quantity * current;
+      const left = Math.max(0, (source?.stock || 0) - used);
+      room = Math.min(room, part.quantity > 0 ? Math.floor(left / part.quantity) : 0);
+    }
+    return room;
+  }
+  const used = reservedUnits(product.id) - current;
+  return Math.max(0, (product.stock || 0) - used);
+}
+
+function paintCartLine(line) {
+  const hint = document.querySelector(`[data-cart-line="${line.productId}"] [data-cart-math]`);
+  if (hint) hint.textContent = `${line.quantity} · ${displayMoney(line.priceCents * line.quantity)}`;
+}
+
+function setCartQuantity(line, quantity, source) {
+  const product = state.products.find((item) => item.id === line.productId);
+  const room = Math.min(500, cartRoom(product, line));
+  let next = quantity;
+  if (!Number.isInteger(next) || next < 1) return false;
+  if (next > room) {
+    next = room;
+    toast(room > 0 ? `Solo quedan ${room} de ${line.name}.` : `No quedan existencias de ${line.name}.`, 'bad');
+  }
+  if (next < 1) return false;
+  line.quantity = next;
+  paintCartLine(line);
+  document.querySelectorAll(`[data-cart-qty="${line.productId}"]`).forEach((input) => {
+    if (input !== source) input.value = String(next);
+  });
+  if ((source?.id === 'pos-qty' || source?.id === 'buy-qty') && String(source.value) !== String(next)) {
+    source.value = String(next);
+  }
+  if (source?.dataset?.cartQty && state.cart[state.cart.length - 1] === line) {
+    const field = document.getElementById('pos-qty') || document.getElementById('buy-qty');
+    if (field && field !== source) field.value = String(next);
+  }
+  const cents = state.cart.reduce((sum, item) => sum + item.priceCents * item.quantity, 0);
+  const buyTotal = document.getElementById('buy-total');
+  const posTotal = document.getElementById('pos-total');
+  if (buyTotal) buyTotal.textContent = money(cents);
+  if (posTotal) posTotal.textContent = displayMoney(cents);
+  return true;
 }
 
 function refreshBuyCart() {
@@ -3373,6 +3432,7 @@ async function onSubmit(event) {
         code: values.code || '',
         price: values.price,
         active: Boolean(form.querySelector('input[name="active"]')?.checked),
+        quickSale: Boolean(form.querySelector('input[name="quickSale"]')?.checked),
         payUsd,
         payBs,
         items: state.comboParts.map((part) => ({ productId: part.productId, quantity: part.quantity })),
@@ -4033,6 +4093,13 @@ async function onClick(event) {
     }
     return;
   }
+  if (action === 'toggle-quick') {
+    const show = control.dataset.quick !== '1';
+    await api(`/api/combos/${control.dataset.id}`, { method: 'PATCH', body: { quickSale: show } });
+    toast(show ? 'El combo queda en la venta rápida.' : 'El combo salió de la venta rápida.');
+    await render();
+    return;
+  }
   if (action === 'toggle-product') {
     const active = control.dataset.active !== '1';
     const product = state.products.find((item) => item.id === Number(control.dataset.id));
@@ -4237,6 +4304,14 @@ document.addEventListener('input', (event) => {
     if (products) products.innerHTML = productListHtml();
     if (combos) combos.innerHTML = comboBoardHtml(state.products.filter((product) => product.isCombo));
   }
+  const cartQty = event.target.closest?.('[data-cart-qty]');
+  if (cartQty) {
+    const line = state.cart.find((item) => item.productId === Number(cartQty.dataset.cartQty));
+    if (line) setCartQuantity(line, Number(cartQty.value), cartQty);
+  }
+  if ((event.target.id === 'pos-qty' || event.target.id === 'buy-qty') && state.cart.length) {
+    setCartQuantity(state.cart[state.cart.length - 1], Number(event.target.value), event.target);
+  }
   if (event.target.id === 'buy-search' || event.target.id === 'pos-search') {
     const box = document.getElementById(event.target.id === 'pos-search' ? 'pos-results' : 'buy-results');
     if (box) box.innerHTML = buyResultsHtml(event.target.value);
@@ -4293,6 +4368,28 @@ document.addEventListener('change', (event) => {
       paintVisor(data.ticket);
       toast('Método de pago actualizado.');
     }).catch((error) => toast(error.message, 'bad'));
+  }
+  const productImage = event.target.closest('input[data-product-image]');
+  if (productImage?.files?.[0]) {
+    const file = productImage.files[0];
+    const productId = productImage.dataset.productImage;
+    productImage.value = '';
+    if (file.size > 8 * 1024 * 1024) {
+      toast('La imagen debe pesar 8 MB o menos.', 'bad');
+      return;
+    }
+    const body = new FormData();
+    body.set('file', file);
+    apiForm(`/api/products/${productId}/image`, body)
+      .then((data) => {
+        const index = state.products.findIndex((item) => item.id === data.product.id);
+        if (index >= 0) state.products[index] = { ...state.products[index], ...data.product };
+        const board = document.getElementById('inventory-board');
+        if (board) board.innerHTML = productListHtml();
+        toast('Imagen cargada. El producto ya sale en la búsqueda rápida.');
+      })
+      .catch((error) => toast(error.message, 'bad'));
+    return;
   }
   const input = event.target.closest('input[data-file="qr"]');
   if (input?.files?.[0]) {

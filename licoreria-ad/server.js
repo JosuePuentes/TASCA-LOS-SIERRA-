@@ -1799,7 +1799,7 @@ app.post('/api/products/:id/image', requireAuth, uploadProductImage, (req, res) 
     return res.status(400).json({ error: 'La imagen debe pesar 8 MB o menos.' });
   }
   if (current.image_file) fs.unlink(path.join(productImageDir, path.basename(current.image_file)), () => {});
-  db.prepare('UPDATE products SET image_file = ? WHERE id = ?').run(req.file.filename, id);
+  db.prepare('UPDATE products SET image_file = ?, quick_sale = 1 WHERE id = ?').run(req.file.filename, id);
   res.json({ product: presentProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
 });
 
@@ -1825,10 +1825,11 @@ app.post('/api/combos', requireAuth, (req, res) => {
   const payBs = req.body.payBs == null ? false : Boolean(req.body.payBs);
   if (!payUsd && !payBs) return res.status(400).json({ error: 'Elige al menos una moneda para el combo: dólares o bolívares.' });
   const code = String(req.body.code || '').trim().slice(0, 40);
+  const quickSale = Boolean(req.body.quickSale);
   const info = db.prepare(`
-    INSERT INTO products (name, code, cost_cents, price_cents, stock, units_per_box, active, is_combo, pay_usd, pay_bs, created_at)
-    VALUES (?, ?, 0, ?, 0, 1, ?, 1, ?, ?, ?)
-  `).run(name, code || null, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, new Date().toISOString());
+    INSERT INTO products (name, code, cost_cents, price_cents, stock, units_per_box, active, is_combo, pay_usd, pay_bs, quick_sale, created_at)
+    VALUES (?, ?, 0, ?, 0, 1, ?, 1, ?, ?, ?, ?)
+  `).run(name, code || null, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, quickSale ? 1 : 0, new Date().toISOString());
   const id = num(info.lastInsertRowid);
   saveComboParts(id, recipe.parts);
   res.status(201).json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
@@ -1857,7 +1858,8 @@ app.patch('/api/combos/:id', requireAuth, (req, res) => {
   const payBs = req.body.payBs == null ? Boolean(current.pay_bs) : Boolean(req.body.payBs);
   if (!payUsd && !payBs) return res.status(400).json({ error: 'Elige al menos una moneda para el combo: dólares o bolívares.' });
   const code = req.body.code == null ? (current.code || '') : String(req.body.code).trim().slice(0, 40);
-  db.prepare('UPDATE products SET name = ?, code = ?, price_cents = ?, active = ?, pay_usd = ?, pay_bs = ? WHERE id = ?').run(name, code || null, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, id);
+  const quickSale = req.body.quickSale == null ? Boolean(current.quick_sale) : Boolean(req.body.quickSale);
+  db.prepare('UPDATE products SET name = ?, code = ?, price_cents = ?, active = ?, pay_usd = ?, pay_bs = ?, quick_sale = ? WHERE id = ?').run(name, code || null, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, quickSale ? 1 : 0, id);
   if (parts) saveComboParts(id, parts);
   res.json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
 });
@@ -3048,11 +3050,27 @@ app.get('/api/summary', requireAuth, (req, res) => {
   const globalExpensesBs = expensesBs || (rateNow > 0 ? Math.round(expensesCents * rateNow) : 0);
   const globalProfitCents = globalSalesCents - globalCostCents - globalExpensesCents;
   const globalProfitBs = globalSalesBs - globalCostBs - globalExpensesBs;
-  const pending = num(db.prepare(`
-    SELECT COALESCE(SUM(ii.quantity - ii.delivered), 0) AS n
-    FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
-    WHERE i.refunded_at IS NULL AND ii.exploded_at IS NULL
-  `).get().n);
+  const pendingRows = db.prepare(`
+    SELECT i.created_at, i.channel, ii.quantity, ii.delivered, ii.exploded_at, ii.source_item_id, ii.combo_parts, ii.product_id
+    FROM invoice_items ii
+    JOIN invoices i ON i.id = ii.invoice_id
+    WHERE i.refunded_at IS NULL AND i.created_at >= ? AND i.created_at < ?
+      AND (i.channel IS NULL OR i.channel = '' OR i.channel = 'barra')
+  `).all(range.from.toISOString(), range.to.toISOString())
+    .filter((row) => matchesHour(row.created_at, fromHour, toHour));
+  let pending = 0;
+  for (const row of pendingRows) {
+    if (row.exploded_at) continue;
+    const quantity = num(row.quantity);
+    const delivered = Math.min(num(row.delivered), quantity);
+    const parts = itemParts(row);
+    if (parts.length) {
+      const perSale = parts.reduce((sum, part) => sum + part.quantity, 0);
+      pending += Math.max(0, perSale * (quantity - delivered));
+    } else {
+      pending += Math.max(0, quantity - delivered);
+    }
+  }
   const recent = [...invoiceTimes.entries()]
     .sort((left, right) => String(right[1]).localeCompare(String(left[1])) || right[0] - left[0])
     .slice(0, 6)

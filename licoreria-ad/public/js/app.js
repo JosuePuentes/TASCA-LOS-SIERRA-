@@ -42,6 +42,9 @@ const state = {
   staff: [],
   editingUser: null,
   screens: [],
+  orderAlerts: [],
+  pendingBarraId: 0,
+  skipNoticeId: 0,
 };
 
 const MODULES = [
@@ -73,6 +76,8 @@ let screenBoot = null;
 let buyGuard = 0;
 let salesTimer = 0;
 let liveTimer = 0;
+let noticeTimer = 0;
+let audioCtx = null;
 let youtubeSeconds = null;
 let screenReady = true;
 
@@ -1272,6 +1277,7 @@ function posView() {
         <div id="pos-lines">${cartLinesHtml()}</div>
         <div class="total-box"><span>Total</span><strong id="pos-total">${displayMoney(total)}</strong></div>
         <button class="btn primary" type="button" data-action="charge-sale" ${state.cart.length ? '' : 'disabled'}>Cobrar y emitir QR</button>
+        <p class="hint">Al cobrar eliges si pasa a barra o es venta al detal.</p>
       </section>
     </div>`;
 }
@@ -1290,6 +1296,7 @@ function issuedSaleView(sale) {
         <p class="code">Factura ${esc(sale.numberLabel)}</p>
         ${lines}
         <p class="price-line">${chargedTotal(sale)} · ${esc(paymentLabel(sale.paymentMethod))}${sale.currency === 'bs' && sale.bcvRate ? ` · tasa ${sale.bcvRate}` : ''}</p>
+        <p class="hint">${sale.channel === 'detal' ? 'Venta al detal. Se entregó en el momento.' : 'Pasó a barra.'}</p>
         <p class="hint">${esc(formatDateTime(sale.createdAt))}</p>
       </div>
       <div class="stub-qr"><img alt="QR de la factura ${esc(sale.numberLabel)}" src="${sale.qrDataUrl}"></div>
@@ -1303,6 +1310,151 @@ function refreshPosCart() {
   if (lines) lines.innerHTML = cartLinesHtml();
   if (total) total.textContent = displayMoney(state.cart.reduce((sum, line) => sum + line.priceCents * line.quantity, 0));
   if (button) button.disabled = state.cart.length === 0;
+}
+
+function channelModal(name) {
+  return `
+    <div class="modal-back" data-modal="channel" data-action="close-channel">
+      <article class="modal card" data-stop>
+        <p class="stub-kicker">Confirmar factura</p>
+        <h2>¿A dónde pasa esta venta?</h2>
+        <p class="lead page-lead">La cuenta de ${esc(name)} ya está lista. Elige antes de emitir el QR.</p>
+        <div class="channel-actions">
+          <button class="btn primary" type="button" data-action="confirm-channel" data-channel="barra">Pasar a barra</button>
+          <button class="btn amber" type="button" data-action="confirm-channel" data-channel="detal">Venta al detal</button>
+        </div>
+        <p class="hint">Barra avisa a quien tenga ese módulo. Venta al detal se entrega en el momento y no entra a barra.</p>
+        <div class="row-actions" style="margin-top:12px">
+          <button class="btn ghost" type="button" data-action="close-channel">Cancelar</button>
+        </div>
+      </article>
+    </div>`;
+}
+
+function noticeKey() {
+  return `ad-notice-${state.user?.id || 0}`;
+}
+
+function noticeCursor() {
+  return Number(sessionStorage.getItem(noticeKey()) || 0);
+}
+
+function setNoticeCursor(id) {
+  const next = Math.max(noticeCursor(), Number(id) || 0);
+  sessionStorage.setItem(noticeKey(), String(next));
+}
+
+function stopNotices() {
+  if (noticeTimer) clearInterval(noticeTimer);
+  noticeTimer = 0;
+}
+
+function unlockSound() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  audioCtx = audioCtx || new Ctx();
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+}
+
+function playOrderSound() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  audioCtx = audioCtx || new Ctx();
+  const ring = () => {
+    const now = audioCtx.currentTime;
+    [523.25, 659.25, 783.99].forEach((freq, index) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const at = now + index * 0.14;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.2, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.4);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(at);
+      osc.stop(at + 0.42);
+    });
+  };
+  if (audioCtx.state === 'suspended') audioCtx.resume().then(ring).catch(() => {});
+  else ring();
+}
+
+function renderOrderAlerts() {
+  let host = document.getElementById('order-alerts');
+  if (!state.orderAlerts.length) {
+    host?.remove();
+    return;
+  }
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'order-alerts';
+    document.body.appendChild(host);
+  }
+  host.innerHTML = state.orderAlerts.map((notice) => {
+    const items = (notice.items || []).map((item) => `${item.quantity} ${esc(item.productName)}`).join(' · ');
+    return `
+      <article class="order-alert" data-stop>
+        <p class="stub-kicker">Factura ${esc(notice.numberLabel)}</p>
+        <h2>Pedido nuevo</h2>
+        <p class="order-who">${esc(notice.customerName)}</p>
+        <p class="order-items">${esc(items)}</p>
+        <p class="price-line">${chargedTotal(notice)}</p>
+        <div class="row-actions">
+          <button class="btn primary small" type="button" data-action="open-notice" data-id="${notice.id}">Abrir en barra</button>
+          <button class="btn ghost small" type="button" data-action="dismiss-notice" data-id="${notice.id}">Ocultar</button>
+        </div>
+      </article>`;
+  }).join('');
+}
+
+function showNotices(notices) {
+  let added = false;
+  for (const notice of notices) {
+    if (notice.id === state.skipNoticeId) continue;
+    if (state.orderAlerts.some((item) => item.id === notice.id)) continue;
+    state.orderAlerts.unshift(notice);
+    added = true;
+  }
+  state.orderAlerts = state.orderAlerts.slice(0, 3);
+  if (!added) return;
+  renderOrderAlerts();
+  playOrderSound();
+}
+
+async function pullNotices() {
+  if (!state.user || !allow('barra')) return;
+  try {
+    if (!sessionStorage.getItem(noticeKey())) {
+      const data = await api('/api/notices/barra?bootstrap=1', { soft: true });
+      sessionStorage.setItem(noticeKey(), String(data.latest || 0));
+      return;
+    }
+    const data = await api(`/api/notices/barra?after=${noticeCursor()}`, { soft: true });
+    const notices = data.notices || [];
+    if (!notices.length) return;
+    setNoticeCursor(notices[notices.length - 1].id);
+    showNotices(notices);
+    if (currentPath() === '/panel/barra') {
+      const boardData = await api(`/api/invoices?q=${encodeURIComponent(state.barraQuery || '')}`, { soft: true });
+      state.barra = boardData.sales || [];
+      const board = document.getElementById('barra-board');
+      if (board) board.innerHTML = barraBoardHtml();
+    }
+  } catch {
+    // El aviso vuelve a intentarse en el siguiente ciclo.
+  }
+}
+
+function watchBarraNotices() {
+  if (!state.user || !allow('barra')) {
+    stopNotices();
+    return;
+  }
+  if (noticeTimer) return;
+  pullNotices();
+  noticeTimer = setInterval(pullNotices, 4000);
 }
 
 function barraView() {
@@ -1324,7 +1476,7 @@ function barraView() {
 
 function barraBoardHtml() {
   if (!state.barra.length) {
-    return `<div class="empty"><h3>${state.barraQuery ? 'Ninguna factura coincide' : 'Todavía no hay facturas'}</h3><p class="lead">${state.barraQuery ? 'Prueba con otro nombre o número.' : 'Cuando cobres en Venta, la factura aparece aquí.'}</p></div>`;
+    return `<div class="empty"><h3>${state.barraQuery ? 'Ninguna factura coincide' : 'Todavía no hay pedidos de barra'}</h3><p class="lead">${state.barraQuery ? 'Prueba con otro nombre o número.' : 'Cuando una venta pase a barra, aparece aquí.'}</p></div>`;
   }
   return state.barra.map((sale) => {
     const products = (sale.items || []).map((item) => `${item.remaining} de ${item.quantity} ${item.productName}`).join(' · ');
@@ -2006,7 +2158,7 @@ function usersView() {
     <div class="stack">
       <form class="card product-form" data-form="staff">
         <h2>${editing ? `Permisos de ${esc(editing.username)}` : 'Nuevo usuario'}</h2>
-        <p class="lead page-lead">Al entrar, solo verá los módulos que marques.</p>
+        <p class="lead page-lead">Al entrar, solo verá los módulos que marques. Quien tenga Barra recibe el aviso de cada pedido que pase a barra.</p>
         ${editing ? '' : `<label class="field"><span>Usuario</span><input name="username" required minlength="3" maxlength="24" placeholder="caja"></label>
         <label class="field"><span>Contraseña</span><input name="password" type="password" required minlength="8"></label>`}
         ${editing ? `<label class="field"><span>Nueva contraseña</span><input name="password" type="password" minlength="8" placeholder="Déjala vacía para no cambiarla"></label>` : ''}
@@ -2527,6 +2679,17 @@ async function render() {
       if (token !== renderToken) return;
       mount(shell(barraView()));
       document.getElementById('barra-search')?.focus();
+      if (state.pendingBarraId) {
+        const id = state.pendingBarraId;
+        state.pendingBarraId = 0;
+        try {
+          const opened = await api(`/api/invoices/${id}`);
+          if (token !== renderToken) return;
+          openBarraSale(opened.sale);
+        } catch (error) {
+          toast(error.message, 'bad');
+        }
+      }
       return;
     }
     if (path === '/panel/inventario') {
@@ -2637,6 +2800,7 @@ async function onSubmit(event) {
   try {
     if (kind === 'login') {
       state.user = (await api('/api/login', { method: 'POST', body: values })).user;
+      watchBarraNotices();
       toast('Sesión iniciada.');
       await navigate('/panel');
       return;
@@ -2875,7 +3039,10 @@ async function onClick(event) {
   }
   if (action === 'logout') {
     await api('/api/logout', { method: 'POST', body: {} }).catch(() => {});
+    stopNotices();
     state.user = null;
+    state.orderAlerts = [];
+    renderOrderAlerts();
     toast('Sesión cerrada.');
     await navigate('/');
     return;
@@ -3094,24 +3261,67 @@ async function onClick(event) {
       toast('Agrega un producto a la venta.', 'bad');
       return;
     }
+    mountModal(channelModal(customerName));
+    return;
+  }
+  if (action === 'close-channel') {
+    document.querySelector('[data-modal="channel"]')?.remove();
+    return;
+  }
+  if (action === 'confirm-channel') {
+    const customerName = document.getElementById('pos-name')?.value.trim() || '';
+    if (customerName.length < 2 || !state.cart.length) {
+      document.querySelector('[data-modal="channel"]')?.remove();
+      toast('Revisa el cliente y los productos antes de cobrar.', 'bad');
+      return;
+    }
     control.disabled = true;
     const body = new FormData();
     body.set('customerName', customerName);
     body.set('paymentMethod', document.getElementById('pos-pay')?.value || 'efectivo');
     body.set('currency', state.saleCurrency === 'bs' ? 'bs' : 'usd');
+    body.set('channel', control.dataset.channel === 'detal' ? 'detal' : 'barra');
     body.set('items', JSON.stringify(state.cart.map((line) => ({ productId: line.productId, quantity: line.quantity }))));
     const file = document.getElementById('pos-file')?.files?.[0];
     if (file) body.set('file', file);
     try {
       const data = await apiForm('/api/pos/sales', body);
+      if (data.sale?.channel === 'barra') {
+        state.skipNoticeId = data.sale.id;
+        setNoticeCursor(data.sale.id);
+      }
       state.cart = [];
       state.issuedSale = data.sale;
+      document.querySelector('[data-modal="channel"]')?.remove();
       mount(shell(posView()));
-      toast('Factura lista. El QR abre la cuenta.');
+      toast(data.sale?.channel === 'detal' ? 'Venta al detal lista.' : 'Factura en barra. El QR abre la cuenta.');
     } catch (error) {
       toast(error.message, 'bad');
-      control.disabled = false;
+      if (document.body.contains(control)) control.disabled = false;
     }
+    return;
+  }
+  if (action === 'dismiss-notice') {
+    const id = Number(control.dataset.id);
+    state.orderAlerts = state.orderAlerts.filter((item) => item.id !== id);
+    renderOrderAlerts();
+    return;
+  }
+  if (action === 'open-notice') {
+    const id = Number(control.dataset.id);
+    state.orderAlerts = state.orderAlerts.filter((item) => item.id !== id);
+    renderOrderAlerts();
+    if (currentPath() === '/panel/barra') {
+      try {
+        const data = await api(`/api/invoices/${id}`);
+        openBarraSale(data.sale);
+      } catch (error) {
+        toast(error.message, 'bad');
+      }
+      return;
+    }
+    state.pendingBarraId = id;
+    await navigate('/panel/barra');
     return;
   }
   if (action === 'new-sale') {
@@ -3481,6 +3691,7 @@ async function onClick(event) {
   }
 }
 
+document.addEventListener('pointerdown', unlockSound);
 document.addEventListener('click', (event) => {
   onClick(event).catch((error) => toast(error.message || 'No se pudo completar la acción.', 'bad'));
 });
@@ -3634,6 +3845,10 @@ document.addEventListener('change', (event) => {
   }
 });
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && document.querySelector('[data-modal="channel"]')) {
+    document.querySelector('[data-modal="channel"]')?.remove();
+    return;
+  }
   if (event.key === 'Escape') {
     state.detail = null;
     state.delivery = null;
@@ -3652,9 +3867,12 @@ if ('serviceWorker' in navigator) {
 
 api('/api/me', { soft: true })
   .then((data) => {
-    state.user = data.user;
+    state.user = data.user || null;
   })
   .catch(() => {
     state.user = null;
   })
-  .finally(() => render());
+  .finally(() => {
+    watchBarraNotices();
+    return render();
+  });

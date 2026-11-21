@@ -344,6 +344,8 @@ db.exec(`
 if (!columnNames('invoice_items').includes('cost_cents')) db.exec('ALTER TABLE invoice_items ADD COLUMN cost_cents INTEGER NOT NULL DEFAULT 0');
 if (!columnNames('invoices').includes('currency')) db.exec(`ALTER TABLE invoices ADD COLUMN currency TEXT NOT NULL DEFAULT 'usd'`);
 if (!columnNames('invoices').includes('bcv_rate')) db.exec('ALTER TABLE invoices ADD COLUMN bcv_rate REAL NOT NULL DEFAULT 0');
+if (!columnNames('invoices').includes('channel')) db.exec(`ALTER TABLE invoices ADD COLUMN channel TEXT NOT NULL DEFAULT 'barra'`);
+if (!columnNames('invoice_items').includes('delivered_marks')) db.exec('ALTER TABLE invoice_items ADD COLUMN delivered_marks TEXT');
 if (!columnNames('movements').includes('invoice_id')) {
   db.exec('ALTER TABLE movements ADD COLUMN invoice_id INTEGER');
 }
@@ -895,6 +897,7 @@ const API_RULES = [
   { test: /^\/api\/stock$/, modules: ['cargas', 'inventario'] },
   { test: /^\/api\/expenses(\/|$)/, modules: ['gastos', 'resumen'] },
   { test: /^\/api\/pos\/sales$/, modules: ['venta'] },
+  { test: /^\/api\/notices\/barra$/, modules: ['barra'] },
   { test: /^\/api\/invoices\/\d+\/deliver$/, modules: ['barra'] },
   { test: /^\/api\/invoices\/\d+\/refund$/, modules: ['barra'] },
   { test: /^\/api\/invoices\/\d+\/receipt$/, modules: ['venta', 'barra', 'movimientos'] },
@@ -1958,6 +1961,7 @@ function loadInvoice(id) {
     hasReceipt: Boolean(invoice.receipt_file),
     totalCents: items.reduce((sum, item) => sum + item.totalCents, 0),
     currency: invoice.currency || 'usd',
+    channel: invoice.channel === 'detal' ? 'detal' : 'barra',
     bcvRate: Number(invoice.bcv_rate) || 0,
     totalBsCents: Math.round(items.reduce((sum, item) => sum + item.totalCents, 0) * (Number(invoice.bcv_rate) || 0)),
     items,
@@ -1967,9 +1971,10 @@ function loadInvoice(id) {
 function findInvoices(query) {
   const text = String(query || '').trim().slice(0, 80);
   const params = [];
-  let where = '';
+  const barraOnly = `(channel IS NULL OR channel = '' OR channel = 'barra')`;
+  let where = `WHERE ${barraOnly}`;
   if (text) {
-    where = `WHERE customer_name LIKE ? COLLATE NOCASE
+    where += ` AND (customer_name LIKE ? COLLATE NOCASE
       OR code LIKE ? COLLATE NOCASE
       OR CAST(number AS TEXT) LIKE ?`;
     const like = `%${text.replace(/[%_]/g, '')}%`;
@@ -1978,6 +1983,7 @@ function findInvoices(query) {
       where += ' OR number = ?';
       params.push(Number(text));
     }
+    where += ')';
   }
   return db.prepare(`
     SELECT id FROM invoices
@@ -2052,6 +2058,11 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: 'Elige el método de pago.' });
   }
+  const channel = req.body.channel === 'detal' ? 'detal' : req.body.channel === 'barra' ? 'barra' : '';
+  if (!channel) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: 'Elige si la venta pasa a barra o es venta al detal.' });
+  }
   const currency = req.body.currency === 'bs' ? 'bs' : 'usd';
   const bcvRate = currentRate();
   if (currency === 'bs' && bcvRate <= 0) {
@@ -2068,12 +2079,12 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     throw error;
   }
   const insertInvoice = db.prepare(`
-    INSERT INTO invoices (number, code, customer_name, payment_method, currency, bcv_rate, receipt_file, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO invoices (number, code, customer_name, payment_method, currency, bcv_rate, receipt_file, created_at, channel)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertItem = db.prepare(`
-    INSERT INTO invoice_items (invoice_id, product_id, product_name, unit_price_cents, cost_cents, quantity, delivered)
-    VALUES (?, ?, ?, ?, ?, ?, 0)
+    INSERT INTO invoice_items (invoice_id, product_id, product_name, unit_price_cents, cost_cents, quantity, delivered, delivered_marks)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const takeStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND active = 1 AND is_combo = 0 AND stock >= ?');
   let invoiceId = 0;
@@ -2094,7 +2105,7 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
       if (currency === 'usd' && !allowUsd) throw httpError(400, `${line.product.name} no se cobra en dólares.`);
       if (currency === 'bs' && !allowBs) throw httpError(400, `${line.product.name} no se cobra en bolívares.`);
     }
-    const info = insertInvoice.run(number, code, customerName, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString());
+    const info = insertInvoice.run(number, code, customerName, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString(), channel);
     invoiceId = num(info.lastInsertRowid);
     for (const [productId, quantity] of consumption) {
       const taken = takeStock.run(quantity, productId, quantity);
@@ -2107,7 +2118,11 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
       const costCents = line.product.is_combo
         ? num(db.prepare(`SELECT COALESCE(SUM(ci.quantity * p.cost_cents), 0) AS n FROM combo_items ci JOIN products p ON p.id = ci.product_id WHERE ci.combo_id = ?`).get(line.product.id).n)
         : num(line.product.cost_cents);
-      insertItem.run(invoiceId, line.product.id, line.product.name, num(line.product.price_cents), costCents, line.quantity);
+      const delivered = channel === 'detal' ? line.quantity : 0;
+      const marks = channel === 'detal'
+        ? JSON.stringify(Array.from({ length: line.quantity }, (_, index) => index + 1))
+        : null;
+      insertItem.run(invoiceId, line.product.id, line.product.name, num(line.product.price_cents), costCents, line.quantity, delivered, marks);
       logMovement({
         kind: 'venta',
         productId: num(line.product.id),
@@ -2150,6 +2165,35 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
 
 app.get('/api/invoices', requireAuth, (req, res) => {
   res.json({ sales: findInvoices(req.query.q) });
+});
+
+app.get('/api/notices/barra', requireAuth, (req, res) => {
+  const barraOnly = `(channel IS NULL OR channel = '' OR channel = 'barra')`;
+  if (req.query.bootstrap === '1') {
+    const latest = num(db.prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM invoices WHERE ${barraOnly}`).get().n);
+    return res.json({ notices: [], latest });
+  }
+  const after = Math.max(0, Number(req.query.after) || 0);
+  const notices = db.prepare(`
+    SELECT id FROM invoices
+    WHERE id > ? AND ${barraOnly}
+    ORDER BY id ASC
+    LIMIT 8
+  `).all(after).map((row) => {
+    const sale = loadInvoice(num(row.id));
+    return {
+      id: sale.id,
+      numberLabel: sale.numberLabel,
+      customerName: sale.customerName,
+      createdAt: sale.createdAt,
+      totalCents: sale.totalCents,
+      currency: sale.currency,
+      bcvRate: sale.bcvRate,
+      totalBsCents: sale.totalBsCents,
+      items: sale.items.map((item) => ({ productName: item.productName, quantity: item.quantity })),
+    };
+  });
+  res.json({ notices });
 });
 
 app.get('/api/invoices/code/:code', requireAuth, asyncRoute(async (req, res) => {

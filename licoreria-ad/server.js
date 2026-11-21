@@ -423,6 +423,22 @@ if (userCount === 0) {
 } else if (num(db.prepare('SELECT COUNT(*) AS n FROM users WHERE is_admin = 1').get().n) === 0) {
   db.prepare('UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)').run();
 }
+const accessReset = 'admin_login_reset_1';
+if (tenant.adminPassword && !db.prepare('SELECT value FROM settings WHERE key = ?').get(accessReset)) {
+  const hash = bcrypt.hashSync(tenant.adminPassword, 10);
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(tenant.adminUser);
+  if (existing) {
+    db.prepare('UPDATE users SET password_hash = ?, is_admin = 1 WHERE id = ?').run(hash, existing.id);
+  } else {
+    db.prepare('INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 1, ?)').run(
+      tenant.adminUser,
+      hash,
+      new Date().toISOString(),
+    );
+  }
+  db.prepare(`INSERT INTO settings (key, value) VALUES (?, '1') ON CONFLICT(key) DO NOTHING`).run(accessReset);
+  tenant.seededAdmin = true;
+}
 }
 
 bootTenant();

@@ -6,21 +6,29 @@ import licoreria, { hosts } from './licoreria-ad/server.js';
 
 const gate = express();
 gate.set('trust proxy', true);
-function isLicoreria(host) {
+function isLicoreria(req) {
   if (String(process.env.NEGOCIO || '').toLowerCase() === 'licoreria-ad') return true;
   const deployment = [
     process.env.VERCEL_PROJECT_PRODUCTION_URL,
     process.env.VERCEL_URL,
     process.env.VERCEL_BRANCH_URL,
+    process.env.VERCEL_PROJECT_NAME,
   ].join(' ').toLowerCase();
   if (deployment.includes('licoreria')) return true;
-  if (hosts.has(host)) return true;
-  return host.includes('licoreria');
+  const blob = [
+    req.hostname,
+    req.headers?.host,
+    req.headers?.['x-forwarded-host'],
+    req.headers?.['x-original-host'],
+    req.headers?.origin,
+    req.headers?.referer,
+  ].join(' ').toLowerCase();
+  if ([...hosts].some((item) => item && blob.includes(item))) return true;
+  return blob.includes('licoreria');
 }
 
 gate.use((req, res, next) => {
-  const host = String(req.hostname || '').toLowerCase();
-  if (isLicoreria(host)) return licoreria(req, res, next);
+  if (isLicoreria(req)) return licoreria(req, res, next);
   return tasca(req, res, next);
 });
 

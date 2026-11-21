@@ -359,6 +359,29 @@ if (!columnNames('invoices').includes('bcv_rate')) db.exec('ALTER TABLE invoices
 if (!columnNames('invoices').includes('channel')) db.exec(`ALTER TABLE invoices ADD COLUMN channel TEXT NOT NULL DEFAULT 'barra'`);
 if (!columnNames('invoices').includes('customer_document')) db.exec('ALTER TABLE invoices ADD COLUMN customer_document TEXT');
 if (!columnNames('invoices').includes('payment_reference')) db.exec('ALTER TABLE invoices ADD COLUMN payment_reference TEXT');
+if (!columnNames('supplier_purchases').includes('paid_at')) db.exec('ALTER TABLE supplier_purchases ADD COLUMN paid_at TEXT');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS banks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'usd',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS bank_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bank_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    note TEXT,
+    invoice_id INTEGER,
+    purchase_id INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (bank_id) REFERENCES banks(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bank_entries_bank ON bank_entries(bank_id, created_at);
+`);
 if (!columnNames('invoice_items').includes('delivered_marks')) db.exec('ALTER TABLE invoice_items ADD COLUMN delivered_marks TEXT');
 if (!columnNames('invoice_items').includes('combo_parts')) db.exec('ALTER TABLE invoice_items ADD COLUMN combo_parts TEXT');
 if (!columnNames('invoice_items').includes('exploded_at')) db.exec('ALTER TABLE invoice_items ADD COLUMN exploded_at TEXT');
@@ -1120,6 +1143,10 @@ const API_RULES = [
   { test: /^\/api\/summary$/, modules: ['resumen', 'venta'] },
   { test: /^\/api\/rate$/, modules: ['venta', 'resumen', 'inventario', 'compras', 'gastos'] },
   { test: /^\/api\/suppliers(\/|$)/, modules: ['compras'] },
+  { test: /^\/api\/banks$/, methods: ['GET'], modules: ['bancos', 'venta', 'compras'] },
+  { test: /^\/api\/banks(\/|$)/, modules: ['bancos'] },
+  { test: /^\/api\/supplier-purchases\/\d+\/pay$/, modules: ['compras', 'bancos'] },
+  { test: /^\/api\/supplier-purchases\/\d+$/, methods: ['PATCH'], modules: ['compras', 'bancos'] },
   { test: /^\/api\/supplier-purchases(\/|$)/, modules: ['compras'] },
   { test: /^\/api\/stock$/, modules: ['cargas', 'inventario'] },
   { test: /^\/api\/expenses(\/|$)/, modules: ['gastos', 'resumen'] },
@@ -1791,7 +1818,7 @@ app.delete('/api/products/:id', requireAuth, (req, res) => {
 
 app.post('/api/products/:id/image', requireAuth, uploadProductImage, (req, res) => {
   const id = Number(req.params.id);
-  const current = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 0').get(id);
+  const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   if (!current) return res.status(404).json({ error: 'No se encontró el producto.' });
   if (!req.file) return res.status(400).json({ error: 'Elige una imagen.' });
   if (req.file.size > 8 * 1024 * 1024) {
@@ -1799,7 +1826,8 @@ app.post('/api/products/:id/image', requireAuth, uploadProductImage, (req, res) 
     return res.status(400).json({ error: 'La imagen debe pesar 8 MB o menos.' });
   }
   if (current.image_file) fs.unlink(path.join(productImageDir, path.basename(current.image_file)), () => {});
-  db.prepare('UPDATE products SET image_file = ?, quick_sale = 1 WHERE id = ?').run(req.file.filename, id);
+  if (current.is_combo) db.prepare('UPDATE products SET image_file = ? WHERE id = ?').run(req.file.filename, id);
+  else db.prepare('UPDATE products SET image_file = ?, quick_sale = 1 WHERE id = ?').run(req.file.filename, id);
   res.json({ product: presentProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
 });
 
@@ -2206,6 +2234,96 @@ function invoiceNumberLabel(number) {
   return String(number).padStart(4, '0');
 }
 
+function activeBank(key) {
+  return db.prepare('SELECT * FROM banks WHERE key = ? AND active = 1').get(String(key || ''));
+}
+
+function bankBalance(bankId) {
+  return num(db.prepare('SELECT COALESCE(SUM(amount_cents), 0) AS n FROM bank_entries WHERE bank_id = ?').get(bankId).n);
+}
+
+function invoiceCollectedCents(invoiceId) {
+  return num(db.prepare(`
+    SELECT COALESCE(SUM(unit_price_cents * quantity), 0) AS n
+    FROM invoice_items
+    WHERE invoice_id = ? AND source_item_id IS NULL
+  `).get(invoiceId).n);
+}
+
+function amountForBank(usdCents, bank, rate) {
+  if (bank.currency !== 'bs') return usdCents;
+  if (!(Number(rate) > 0)) throw httpError(400, 'Coloca la tasa BCV para mover dinero en un banco en bolívares.');
+  return Math.round(usdCents * Number(rate));
+}
+
+function postBankEntry({ bankId, kind, amountCents, note, invoiceId, purchaseId, createdAt }) {
+  db.prepare(`
+    INSERT INTO bank_entries (bank_id, kind, amount_cents, note, invoice_id, purchase_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(bankId, kind, amountCents, note || null, invoiceId ?? null, purchaseId ?? null, createdAt || new Date().toISOString());
+}
+
+function presentBank(row) {
+  return {
+    id: num(row.id),
+    key: row.key,
+    name: row.name,
+    currency: row.currency === 'bs' ? 'bs' : 'usd',
+    active: Boolean(row.active),
+    balanceCents: bankBalance(row.id),
+    createdAt: row.created_at,
+  };
+}
+
+function bankEntryView(row) {
+  return {
+    id: num(row.id),
+    kind: row.kind,
+    amountCents: num(row.amount_cents),
+    note: row.note || '',
+    invoiceId: row.invoice_id == null ? null : num(row.invoice_id),
+    purchaseId: row.purchase_id == null ? null : num(row.purchase_id),
+    createdAt: row.created_at,
+  };
+}
+
+function ensureBanks() {
+  const defaults = [
+    ['efectivo', 'Efectivo', 'usd'],
+    ['tarjeta', 'Tarjeta', 'usd'],
+    ['transferencia', 'Transferencia', 'usd'],
+    ['pago_movil', 'Pago móvil', 'usd'],
+  ];
+  const insert = db.prepare('INSERT INTO banks (key, name, currency, active, created_at) VALUES (?, ?, ?, 1, ?)');
+  const now = new Date().toISOString();
+  for (const [key, name, currency] of defaults) {
+    if (!db.prepare('SELECT id FROM banks WHERE key = ?').get(key)) insert.run(key, name, currency, now);
+  }
+  const pending = db.prepare(`
+    SELECT * FROM invoices
+    WHERE refunded_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM bank_entries e WHERE e.invoice_id = invoices.id AND e.kind = 'venta')
+  `).all();
+  for (const invoice of pending) {
+    const bank = db.prepare('SELECT * FROM banks WHERE key = ?').get(invoice.payment_method);
+    if (!bank) continue;
+    const usd = invoiceCollectedCents(invoice.id);
+    const rate = Number(invoice.bcv_rate) || 0;
+    const amount = bank.currency === 'bs' ? (rate > 0 ? Math.round(usd * rate) : 0) : usd;
+    if (!amount) continue;
+    postBankEntry({
+      bankId: bank.id,
+      kind: 'venta',
+      amountCents: amount,
+      note: `Factura ${invoiceNumberLabel(invoice.number)}`,
+      invoiceId: invoice.id,
+      createdAt: invoice.created_at,
+    });
+  }
+}
+
+ensureBanks();
+
 function requestOrigin(req) {
   const configured = String(process.env.LICORERIA_PUBLIC_URL || '').trim().replace(/\/$/, '');
   if (configured) return configured;
@@ -2353,9 +2471,10 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     return res.status(400).json({ error: 'Escribe el número de referencia.' });
   }
   const paymentMethod = String(req.body.paymentMethod || '');
-  if (!PAYMENTS.has(paymentMethod)) {
+  const saleBank = activeBank(paymentMethod);
+  if (!saleBank) {
     if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(400).json({ error: 'Elige el método de pago.' });
+    return res.status(400).json({ error: 'Elige el banco donde entra el dinero.' });
   }
   const channel = req.body.channel === 'detal' ? 'detal' : req.body.channel === 'barra' ? 'barra' : '';
   if (!channel) {
@@ -2407,6 +2526,15 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     }
     const info = insertInvoice.run(number, code, customerName, '', paymentReference, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString(), channel);
     invoiceId = num(info.lastInsertRowid);
+    const collected = lines.reduce((sum, line) => sum + num(line.product.price_cents) * line.quantity, 0);
+    const bankAmount = amountForBank(collected, saleBank, bcvRate);
+    postBankEntry({
+      bankId: saleBank.id,
+      kind: 'venta',
+      amountCents: bankAmount,
+      note: `Factura ${invoiceNumberLabel(number)} · ${customerName}`,
+      invoiceId,
+    });
     for (const [productId, quantity] of consumption) {
       const taken = takeStock.run(quantity, productId, quantity);
       if (!num(taken.changes)) {
@@ -2688,6 +2816,16 @@ app.post('/api/invoices/:id/refund', requireAuth, (req, res) => {
   try {
     const marked = db.prepare('UPDATE invoices SET refunded_at = ? WHERE id = ? AND refunded_at IS NULL').run(new Date().toISOString(), id);
     if (!num(marked.changes)) throw httpError(409, 'Esta factura ya fue devuelta.');
+    const deposit = db.prepare(`SELECT * FROM bank_entries WHERE invoice_id = ? AND kind = 'venta' ORDER BY id DESC LIMIT 1`).get(id);
+    if (deposit) {
+      postBankEntry({
+        bankId: deposit.bank_id,
+        kind: 'devolucion',
+        amountCents: -num(deposit.amount_cents),
+        note: `Devolución factura ${invoiceNumberLabel(invoice.number)}`,
+        invoiceId: id,
+      });
+    }
     const giveBack = (productId, quantity, unitPriceCents, productName) => {
       const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
       if (!product || product.is_combo) return;
@@ -2836,6 +2974,7 @@ app.get('/api/supplier-purchases', requireAuth, (req, res) => {
         loadedAt: row.loaded_at,
         dueDate: row.due_date || '',
         paymentMethod: row.payment_method,
+        paidAt: row.paid_at || '',
         totalCents: presented.reduce((sum, item) => sum + item.totalCents, 0),
         items: presented,
       };
@@ -2851,7 +2990,7 @@ app.post('/api/supplier-purchases', requireAuth, (req, res) => {
   const dueDate = String(req.body.dueDate || '').trim();
   if (dueDate && !parseDay(dueDate)) return res.status(400).json({ error: 'Revisa la fecha de vencimiento.' });
   const paymentMethod = String(req.body.paymentMethod || '');
-  if (!PAYMENTS.has(paymentMethod)) return res.status(400).json({ error: 'Elige el método de pago.' });
+  if (!activeBank(paymentMethod)) return res.status(400).json({ error: 'Elige el banco con el que se va a pagar esta factura.' });
   if (!Array.isArray(req.body.items) || !req.body.items.length) return res.status(400).json({ error: 'Agrega al menos un producto.' });
   const lines = [];
   for (const raw of req.body.items) {
@@ -2920,6 +3059,166 @@ app.post('/api/supplier-purchases', requireAuth, (req, res) => {
     throw error;
   }
   res.status(201).json({ id: purchaseId });
+});
+
+function supplierPurchaseTotal(purchaseId) {
+  const items = db.prepare('SELECT * FROM supplier_purchase_items WHERE purchase_id = ?').all(purchaseId);
+  return items.reduce((sum, item) => {
+    const packs = num(item.pack_count);
+    const packCost = item.pack_cost_cents == null ? null : num(item.pack_cost_cents);
+    if (packs > 0 && packCost != null) return sum + packs * packCost;
+    return sum + num(item.cost_cents) * num(item.quantity);
+  }, 0);
+}
+
+app.patch('/api/supplier-purchases/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const purchase = db.prepare('SELECT * FROM supplier_purchases WHERE id = ?').get(id);
+  if (!purchase) return res.status(404).json({ error: 'No se encontró esa compra.' });
+  if (purchase.paid_at) return res.status(409).json({ error: 'Esa factura ya fue pagada.' });
+  const paymentMethod = String(req.body.paymentMethod || '');
+  if (!activeBank(paymentMethod)) return res.status(400).json({ error: 'Elige el banco con el que se va a pagar.' });
+  db.prepare('UPDATE supplier_purchases SET payment_method = ? WHERE id = ?').run(paymentMethod, id);
+  res.json({ ok: true });
+});
+
+app.post('/api/supplier-purchases/:id/pay', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const purchase = db.prepare('SELECT * FROM supplier_purchases WHERE id = ?').get(id);
+  if (!purchase) return res.status(404).json({ error: 'No se encontró esa compra.' });
+  if (purchase.paid_at) return res.status(409).json({ error: 'Esa factura ya fue pagada.' });
+  const chosen = String(req.body.paymentMethod || purchase.payment_method || '');
+  if (chosen !== purchase.payment_method) {
+    if (!activeBank(chosen)) return res.status(400).json({ error: 'Elige un banco activo para pagar esta factura.' });
+    db.prepare('UPDATE supplier_purchases SET payment_method = ? WHERE id = ?').run(chosen, id);
+    purchase.payment_method = chosen;
+  }
+  const bank = activeBank(purchase.payment_method);
+  if (!bank) return res.status(400).json({ error: 'Elige un banco activo para pagar esta factura.' });
+  const total = supplierPurchaseTotal(id);
+  let amount = total;
+  try {
+    amount = amountForBank(total, bank, currentRate());
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
+  if (bankBalance(bank.id) < amount) {
+    return res.status(400).json({ error: `No hay suficiente dinero en ${bank.name} para pagar esta factura.` });
+  }
+  const supplier = db.prepare('SELECT name FROM suppliers WHERE id = ?').get(purchase.supplier_id);
+  db.exec('BEGIN');
+  try {
+    const marked = db.prepare('UPDATE supplier_purchases SET paid_at = ? WHERE id = ? AND paid_at IS NULL').run(new Date().toISOString(), id);
+    if (!num(marked.changes)) throw httpError(409, 'Esa factura ya fue pagada.');
+    postBankEntry({
+      bankId: bank.id,
+      kind: 'pago_compra',
+      amountCents: -amount,
+      note: `Pago a ${supplier?.name || 'proveedor'} · factura ${purchase.invoice_date}`,
+      purchaseId: id,
+    });
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* la transacción ya se cerró */ }
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
+  res.json({ ok: true });
+});
+
+function bankSlug(name) {
+  const base = String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 32) || 'banco';
+  let key = base;
+  let n = 2;
+  while (db.prepare('SELECT id FROM banks WHERE key = ?').get(key)) {
+    key = `${base}_${n}`;
+    n += 1;
+  }
+  return key;
+}
+
+app.get('/api/banks', requireAuth, (req, res) => {
+  const banks = db.prepare('SELECT * FROM banks ORDER BY active DESC, name COLLATE NOCASE').all().map(presentBank);
+  const payables = db.prepare(`
+    SELECT sp.id, sp.invoice_date, sp.payment_method, sp.due_date, s.name AS supplier_name
+    FROM supplier_purchases sp
+    JOIN suppliers s ON s.id = sp.supplier_id
+    WHERE sp.paid_at IS NULL
+    ORDER BY sp.due_date IS NULL, sp.due_date, sp.id
+  `).all().map((row) => ({
+    id: num(row.id),
+    supplierName: row.supplier_name,
+    invoiceDate: row.invoice_date,
+    dueDate: row.due_date || '',
+    paymentMethod: row.payment_method,
+    totalCents: supplierPurchaseTotal(row.id),
+  }));
+  res.json({ banks, payables });
+});
+
+app.post('/api/banks', requireAuth, (req, res) => {
+  const name = String(req.body.name || '').trim().slice(0, 60);
+  const currency = req.body.currency === 'bs' ? 'bs' : 'usd';
+  if (name.length < 2) return res.status(400).json({ error: 'Escribe el nombre del banco.' });
+  const info = db.prepare('INSERT INTO banks (key, name, currency, active, created_at) VALUES (?, ?, ?, 1, ?)').run(bankSlug(name), name, currency, new Date().toISOString());
+  res.status(201).json({ bank: presentBank(db.prepare('SELECT * FROM banks WHERE id = ?').get(num(info.lastInsertRowid))) });
+});
+
+app.get('/api/banks/:id', requireAuth, (req, res) => {
+  const bank = db.prepare('SELECT * FROM banks WHERE id = ?').get(Number(req.params.id));
+  if (!bank) return res.status(404).json({ error: 'No se encontró ese banco.' });
+  const entries = db.prepare('SELECT * FROM bank_entries WHERE bank_id = ? ORDER BY created_at DESC, id DESC LIMIT 80').all(bank.id).map(bankEntryView);
+  res.json({ bank: presentBank(bank), entries });
+});
+
+app.patch('/api/banks/:id', requireAuth, (req, res) => {
+  const bank = db.prepare('SELECT * FROM banks WHERE id = ?').get(Number(req.params.id));
+  if (!bank) return res.status(404).json({ error: 'No se encontró ese banco.' });
+  const name = req.body.name == null ? bank.name : String(req.body.name).trim().slice(0, 60);
+  const active = req.body.active == null ? Boolean(bank.active) : Boolean(req.body.active);
+  if (name.length < 2) return res.status(400).json({ error: 'Escribe el nombre del banco.' });
+  db.prepare('UPDATE banks SET name = ?, active = ? WHERE id = ?').run(name, active ? 1 : 0, bank.id);
+  res.json({ bank: presentBank(db.prepare('SELECT * FROM banks WHERE id = ?').get(bank.id)) });
+});
+
+app.post('/api/banks/:id/moves', requireAuth, (req, res) => {
+  const bank = db.prepare('SELECT * FROM banks WHERE id = ? AND active = 1').get(Number(req.params.id));
+  if (!bank) return res.status(404).json({ error: 'No se encontró ese banco.' });
+  const kind = req.body.kind === 'egreso' ? 'egreso' : req.body.kind === 'transferencia' ? 'transferencia' : 'ingreso';
+  const amount = toCents(req.body.amount);
+  if (amount == null || amount <= 0) return res.status(400).json({ error: 'Escribe el monto, con hasta dos decimales.' });
+  const note = String(req.body.note || '').trim().slice(0, 160);
+  if (kind === 'transferencia') {
+    const target = db.prepare('SELECT * FROM banks WHERE id = ? AND active = 1').get(Number(req.body.toBankId));
+    if (!target || target.id === bank.id) return res.status(400).json({ error: 'Elige otro banco para la transferencia.' });
+    let targetAmount = amount;
+    if (target.currency !== bank.currency) {
+      const rate = currentRate();
+      if (!(rate > 0)) return res.status(400).json({ error: 'Coloca la tasa BCV para transferir entre dólares y bolívares.' });
+      targetAmount = bank.currency === 'usd' ? Math.round(amount * rate) : Math.max(1, Math.round(amount / rate));
+    }
+    if (bankBalance(bank.id) < amount) return res.status(400).json({ error: `No hay suficiente dinero en ${bank.name}.` });
+    db.exec('BEGIN');
+    try {
+      postBankEntry({ bankId: bank.id, kind: 'transferencia', amountCents: -amount, note: note || `Hacia ${target.name}` });
+      postBankEntry({ bankId: target.id, kind: 'transferencia', amountCents: targetAmount, note: note || `Desde ${bank.name}` });
+      db.exec('COMMIT');
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch { /* la transacción ya se cerró */ }
+      throw error;
+    }
+    return res.json({ bank: presentBank(db.prepare('SELECT * FROM banks WHERE id = ?').get(bank.id)) });
+  }
+  if (kind === 'egreso' && bankBalance(bank.id) < amount) {
+    return res.status(400).json({ error: `No hay suficiente dinero en ${bank.name}.` });
+  }
+  postBankEntry({
+    bankId: bank.id,
+    kind,
+    amountCents: kind === 'egreso' ? -amount : amount,
+    note: note || (kind === 'egreso' ? 'Retiro' : 'Ingreso'),
+  });
+  res.json({ bank: presentBank(db.prepare('SELECT * FROM banks WHERE id = ?').get(bank.id)) });
 });
 
 app.post('/api/stock', requireAuth, (req, res) => {

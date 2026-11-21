@@ -27,6 +27,9 @@ const state = {
   barraPicks: {},
   issuedSale: null,
   customerQr: null,
+  banks: [],
+  payables: [],
+  bankDetail: null,
   saleCurrency: 'usd',
   bcvRate: 0,
   summaryQuery: { preset: 'day', from: '', to: '', fromHour: '', toHour: '' },
@@ -55,6 +58,7 @@ const MODULES = [
   ['barra', 'Barra'],
   ['inventario', 'Inventario'],
   ['compras', 'Compras'],
+  ['bancos', 'Bancos'],
   ['cargas', 'Cargas y descargas'],
   ['gastos', 'Gastos'],
   ['ventas', 'Ventas'],
@@ -127,6 +131,7 @@ function pageTitle(path) {
     '/panel/barra': 'Barra',
     '/panel/inventario': 'Inventario',
     '/panel/compras': 'Compras',
+    '/panel/bancos': 'Bancos',
     '/panel/cargas': 'Cargas y descargas',
     '/panel/gastos': 'Gastos',
     '/panel/ventas': 'Ventas',
@@ -292,11 +297,21 @@ function entradasLabel(count) {
 
 function paymentLabel(value) {
   if (value === 'cortesia') return 'Sin cobro';
+  const bank = (state.banks || []).find((item) => item.key === value);
+  if (bank) return bank.name;
   return PAYMENTS.find(([key]) => key === value)?.[1] || 'Sin definir';
 }
 
 function paymentOptions(selected) {
-  return PAYMENTS.map(([key, label]) => `<option value="${key}" ${key === selected ? 'selected' : ''}>${label}</option>`).join('');
+  const banks = (state.banks || []).filter((bank) => bank.active || bank.key === selected);
+  const source = banks.length
+    ? banks.map((bank) => [bank.key, `${bank.name} · ${bank.currency === 'bs' ? 'Bs' : '$'}`])
+    : PAYMENTS;
+  return source.map(([key, label]) => `<option value="${esc(key)}" ${key === selected ? 'selected' : ''}>${esc(label)}</option>`).join('');
+}
+
+function bankMoney(cents, currency) {
+  return currency === 'bs' ? moneyBs(cents) : money(cents);
 }
 
 function normalizeCode(raw) {
@@ -399,6 +414,7 @@ function shell(content) {
     ['/panel/barra', 'Barra', 'barra'],
     ['/panel/inventario', 'Inventario', 'inventario'],
     ['/panel/compras', 'Compras', 'compras'],
+    ['/panel/bancos', 'Bancos', 'bancos'],
     ['/panel/cargas', 'Cargas y descargas', 'cargas'],
     ['/panel/gastos', 'Gastos', 'gastos'],
     ['/panel/ventas', 'Ventas', 'ventas'],
@@ -1084,6 +1100,8 @@ function inventoryView() {
           <label class="check"><input name="payBs" type="checkbox" ${combo ? (combo.payBs ? 'checked' : '') : 'checked'}><span>Se cobra en bolívares</span></label>
           <label class="check"><input name="active" type="checkbox" ${combo ? (combo.active ? 'checked' : '') : 'checked'}><span>Disponible para vender</span></label>
           <label class="check"><input name="quickSale" type="checkbox" ${combo?.quickSale ? 'checked' : ''}><span>Mostrar en la venta rápida</span></label>
+          <label class="field"><span>Imagen</span><input name="image" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label>
+          ${combo?.imageUrl ? productThumb(combo, 'product-preview') : ''}
           <p class="form-error" hidden></p>
           <div class="row-actions">
             <button class="btn primary" type="submit">${combo ? 'Guardar combo' : 'Crear combo'}</button>
@@ -1152,6 +1170,7 @@ function comboListHtml(combos) {
   return `<div class="event-list">${combos.map((item) => {
     const recipe = (item.parts || []).map((part) => `${part.quantity} ${esc(part.name)}`).join(' · ') || 'Sin productos';
     return `<article class="event-row ${item.active ? '' : 'inactive'}">
+      ${productThumb(item, 'product-thumb')}
       <div>
         <h3>${item.code ? `${esc(item.code)} · ` : ''}${esc(item.name)}</h3>
         <p class="price-line">Venta ${money(item.priceCents)} · Costo ${money(item.costCents)} · Utilidad ${money(item.profitCents)} · ${[item.payUsd ? 'dólares' : '', item.payBs ? 'bolívares' : ''].filter(Boolean).join(' y ') || 'sin moneda'} · ${item.quickSale ? 'En venta rápida · ' : ''}${item.active ? 'A la venta' : 'Inactivo'}</p>
@@ -1159,6 +1178,7 @@ function comboListHtml(combos) {
         <p class="hint">${item.stock > 0 ? `Alcanzan ${item.stock.toLocaleString('es-ES')} combos` : 'No alcanzan las unidades para vender uno'}</p>
       </div>
       <div class="row-actions">
+        <label class="btn ghost small file-btn">${item.imageUrl ? 'Cambiar imagen' : 'Cargar imagen'}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" data-product-image="${item.id}"></label>
         <button class="btn ghost small" type="button" data-action="edit-combo" data-id="${item.id}">Editar</button>
         <button class="btn ghost small" type="button" data-action="toggle-quick" data-id="${item.id}" data-quick="${item.quickSale ? '1' : '0'}">${item.quickSale ? 'Quitar de venta rápida' : 'Mostrar en venta rápida'}</button>
         <button class="btn ghost small" type="button" data-action="toggle-product" data-id="${item.id}" data-active="${item.active ? '1' : '0'}">${item.active ? 'Desactivar' : 'Activar'}</button>
@@ -1555,13 +1575,112 @@ function purchaseHistoryHtml() {
     <article class="event-row">
       <div>
         <h3>${esc(purchase.supplierName)}</h3>
-        <p class="price-line">Factura ${esc(purchase.invoiceDate)} · Carga ${formatDateTime(purchase.loadedAt)} · ${esc(paymentLabel(purchase.paymentMethod))}${purchase.dueDate ? ` · Vence ${esc(purchase.dueDate)}` : ''}</p>
+        <p class="price-line">Factura ${esc(purchase.invoiceDate)} · Carga ${formatDateTime(purchase.loadedAt)} · ${purchase.paidAt ? `Pagada · ${esc(paymentLabel(purchase.paymentMethod))}` : 'Cuenta por pagar'}${purchase.dueDate ? ` · Vence ${esc(purchase.dueDate)}` : ''}</p>
         <p class="hint">${purchase.items.map((item) => item.packCount
           ? `${item.packCount} cajas de ${esc(item.productName)} · llegan ${item.quantity.toLocaleString('es-ES')} unidades · ${money(item.totalCents)}`
           : `${item.quantity} ${esc(item.productName)} · ${money(item.totalCents)}`).join(' · ')}</p>
       </div>
-      <strong>${money(purchase.totalCents)}</strong>
+      <div class="row-actions">
+        ${purchase.paidAt ? `<strong>${money(purchase.totalCents)}</strong>` : `
+          <select data-supplier-pay="${purchase.id}" aria-label="Banco que paga la factura">${paymentOptions(purchase.paymentMethod)}</select>
+          <button class="btn primary small" type="button" data-action="pay-purchase" data-id="${purchase.id}">Marcar pagada</button>
+          <strong>${money(purchase.totalCents)}</strong>`}
+      </div>
     </article>`).join('')}</div>`;
+}
+
+function bankKindLabel(kind) {
+  return {
+    venta: 'Venta',
+    devolucion: 'Devolución',
+    pago_compra: 'Pago de compra',
+    ingreso: 'Ingreso',
+    egreso: 'Retiro',
+    transferencia: 'Transferencia',
+  }[kind] || 'Movimiento';
+}
+
+function bancosView() {
+  const detail = state.bankDetail;
+  const banks = state.banks || [];
+  const cards = banks.length
+    ? banks.map((bank) => `
+      <article class="stat">
+        <p class="stat-label">${esc(bank.name)} · ${bank.currency === 'bs' ? 'Bolívares' : 'Dólares'}${bank.active ? '' : ' · Inactivo'}</p>
+        <p class="stat-value">${bankMoney(bank.balanceCents, bank.currency)}</p>
+        <div class="row-actions" style="margin-top:10px">
+          <button class="btn ghost small" type="button" data-action="open-bank" data-id="${bank.id}">Historial</button>
+          <button class="btn ghost small" type="button" data-action="toggle-bank" data-id="${bank.id}" data-active="${bank.active ? '1' : '0'}">${bank.active ? 'Desactivar' : 'Activar'}</button>
+        </div>
+      </article>`).join('')
+    : '<p class="hint">Todavía no hay bancos.</p>';
+  const history = detail ? `
+    <section class="card" style="margin-top:16px">
+      <h3>${esc(detail.bank.name)}</h3>
+      <p class="price-line">Saldo ${bankMoney(detail.bank.balanceCents, detail.bank.currency)}</p>
+      <form data-form="bank-move" style="margin-top:12px">
+        <div class="cart-add">
+          <label class="field"><span>Movimiento</span>
+            <select name="kind">
+              <option value="ingreso">Ingreso</option>
+              <option value="egreso">Retiro</option>
+              <option value="transferencia">Transferencia</option>
+            </select>
+          </label>
+          <label class="field"><span>Monto en ${detail.bank.currency === 'bs' ? 'bolívares' : 'dólares'}</span><input name="amount" inputmode="decimal" required placeholder="0,00"></label>
+          <label class="field"><span>Hacia otro banco</span>
+            <select name="toBankId">
+              <option value="">Solo si es transferencia</option>
+              ${banks.filter((bank) => bank.id !== detail.bank.id && bank.active).map((bank) => `<option value="${bank.id}">${esc(bank.name)}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+        <label class="field"><span>Nota</span><input name="note" maxlength="160" placeholder="Opcional"></label>
+        <p class="form-error" hidden></p>
+        <button class="btn primary" type="submit">Registrar movimiento</button>
+      </form>
+      <div class="event-list" style="margin-top:16px">
+        ${(detail.entries || []).length ? detail.entries.map((entry) => `
+          <article class="event-row">
+            <div>
+              <h3>${esc(bankKindLabel(entry.kind))}</h3>
+              <p class="hint">${esc(formatDateTime(entry.createdAt))}${entry.note ? ` · ${esc(entry.note)}` : ''}</p>
+            </div>
+            <strong>${entry.amountCents < 0 ? '−' : '+'}${bankMoney(Math.abs(entry.amountCents), detail.bank.currency)}</strong>
+          </article>`).join('') : '<p class="hint">Este banco todavía no tiene movimientos.</p>'}
+      </div>
+    </section>` : '';
+  const pending = (state.payables || []).filter((item) => !detail || item.paymentMethod === detail.bank.key);
+  const payableHtml = pending.length ? pending.map((item) => `
+    <article class="event-row">
+      <div>
+        <h3>${esc(item.supplierName)}</h3>
+        <p class="hint">Factura ${esc(item.invoiceDate)}${item.dueDate ? ` · Vence ${esc(item.dueDate)}` : ''} · ${esc(paymentLabel(item.paymentMethod))}</p>
+      </div>
+      <div class="row-actions">
+        <strong>${money(item.totalCents)}</strong>
+        <button class="btn primary small" type="button" data-action="pay-purchase" data-id="${item.id}">Marcar pagada</button>
+      </div>
+    </article>`).join('') : '<p class="hint">No hay cuentas por pagar.</p>';
+  return `
+    <h2>Bancos</h2>
+    <p class="lead page-lead">Cada banco es un método de pago. Las ventas suman en el banco elegido. Cuando marcas pagada una compra, ese monto sale del banco de esa factura.</p>
+    <form class="card" data-form="bank" style="margin-bottom:16px">
+      <h3>Nuevo banco</h3>
+      <div class="cart-add">
+        <label class="field"><span>Nombre</span><input name="name" maxlength="60" required placeholder="Banesco, efectivo, pago móvil"></label>
+        <label class="field"><span>Moneda</span><select name="currency"><option value="usd">Dólares</option><option value="bs">Bolívares</option></select></label>
+      </div>
+      <p class="form-error" hidden></p>
+      <button class="btn primary" type="submit">Agregar banco</button>
+    </form>
+    <div class="grid-stats thirds">${cards}</div>
+    ${history}
+    <section class="card" style="margin-top:16px">
+      <h3>Cuentas por pagar</h3>
+      <p class="hint">Salen de las compras que todavía no se pagaron.</p>
+      <div class="event-list" style="margin-top:12px">${payableHtml}</div>
+    </section>`;
 }
 
 function comprasView() {
@@ -2604,6 +2723,7 @@ const routeModules = {
   '/panel/barra': 'barra',
   '/panel/inventario': 'inventario',
   '/panel/compras': 'compras',
+  '/panel/bancos': 'bancos',
   '/panel/cargas': 'cargas',
   '/panel/gastos': 'gastos',
   '/panel/ventas': 'ventas',
@@ -3228,14 +3348,16 @@ async function render() {
     if (path === '/panel/venta') {
       state.issuedSale = null;
       mount(shell(loading()));
-      const [catalog, rate, customerQr] = await Promise.all([
+      const [catalog, rate, customerQr, banks] = await Promise.all([
         api('/api/products'),
         api('/api/rate'),
         api('/api/public/customer-qr', { soft: true }).catch(() => null),
+        api('/api/banks').catch(() => ({ banks: [] })),
       ]);
       state.products = catalog.products;
       state.bcvRate = rate.rate;
       state.customerQr = customerQr;
+      state.banks = banks.banks || [];
       if (token !== renderToken) return;
       mount(shell(posView()));
       document.getElementById('pos-search')?.focus();
@@ -3243,14 +3365,16 @@ async function render() {
     }
     if (path === '/panel/compras') {
       mount(shell(loading()));
-      const [catalog, suppliers, purchases] = await Promise.all([
+      const [catalog, suppliers, purchases, banks] = await Promise.all([
         api('/api/products'),
         api('/api/suppliers'),
         api('/api/supplier-purchases'),
+        api('/api/banks').catch(() => ({ banks: [] })),
       ]);
       state.products = catalog.products;
       state.suppliers = suppliers.suppliers;
       state.supplierPurchases = purchases.purchases;
+      state.banks = banks.banks || [];
       if (token !== renderToken) return;
       mount(shell(comprasView()));
       return;
@@ -3261,6 +3385,19 @@ async function render() {
       if (token !== renderToken) return;
       mount(shell(cargasView()));
       document.getElementById('stock-search')?.focus();
+      return;
+    }
+    if (path === '/panel/bancos') {
+      mount(shell(loading()));
+      const data = await api('/api/banks');
+      state.banks = data.banks || [];
+      state.payables = data.payables || [];
+      if (state.bankDetail?.bank?.id) {
+        const still = state.banks.some((bank) => bank.id === state.bankDetail.bank.id);
+        state.bankDetail = still ? await api(`/api/banks/${state.bankDetail.bank.id}`) : null;
+      }
+      if (token !== renderToken) return;
+      mount(shell(bancosView()));
       return;
     }
     if (path === '/panel/gastos') {
@@ -3572,6 +3709,11 @@ async function onSubmit(event) {
         setFormError(form, 'Elige al menos una moneda: dólares o bolívares.');
         return;
       }
+      const image = form.querySelector('input[name="image"]')?.files?.[0];
+      if (image && image.size > 8 * 1024 * 1024) {
+        setFormError(form, 'La imagen debe pesar 8 MB o menos.');
+        return;
+      }
       const body = {
         name: values.name,
         code: values.code || '',
@@ -3582,8 +3724,14 @@ async function onSubmit(event) {
         payBs,
         items: state.comboParts.map((part) => ({ productId: part.productId, quantity: part.quantity })),
       };
-      if (state.editingCombo) await api(`/api/combos/${state.editingCombo.id}`, { method: 'PATCH', body });
-      else await api('/api/combos', { method: 'POST', body });
+      const saved = state.editingCombo
+        ? await api(`/api/combos/${state.editingCombo.id}`, { method: 'PATCH', body })
+        : await api('/api/combos', { method: 'POST', body });
+      if (image) {
+        const fileBody = new FormData();
+        fileBody.set('file', image);
+        await apiForm(`/api/products/${saved.product.id}/image`, fileBody);
+      }
       state.editingCombo = null;
       state.comboParts = [];
       toast('Combo guardado.');
@@ -3598,6 +3746,28 @@ async function onSubmit(event) {
         fromHour: values.fromHour || '',
         toHour: values.toHour || '',
       };
+      await render();
+      return;
+    }
+    if (kind === 'bank') {
+      await api('/api/banks', { method: 'POST', body: { name: values.name, currency: values.currency } });
+      toast('Banco agregado.');
+      await render();
+      return;
+    }
+    if (kind === 'bank-move') {
+      const bankId = state.bankDetail?.bank?.id;
+      if (!bankId) return;
+      await api(`/api/banks/${bankId}/moves`, {
+        method: 'POST',
+        body: {
+          kind: values.kind,
+          amount: values.amount,
+          note: values.note,
+          toBankId: Number(values.toBankId) || 0,
+        },
+      });
+      toast('Movimiento registrado.');
       await render();
       return;
     }
@@ -4204,6 +4374,29 @@ async function onClick(event) {
     refreshComboParts();
     return;
   }
+  if (action === 'open-bank') {
+    state.bankDetail = await api(`/api/banks/${control.dataset.id}`);
+    mount(shell(bancosView()));
+    return;
+  }
+  if (action === 'toggle-bank') {
+    const active = control.dataset.active !== '1';
+    await api(`/api/banks/${control.dataset.id}`, { method: 'PATCH', body: { active } });
+    toast(active ? 'Banco activo.' : 'Banco desactivado. Ya no sale al cobrar.');
+    await render();
+    return;
+  }
+  if (action === 'pay-purchase') {
+    if (!confirm('¿Marcar esta factura como pagada? El monto sale del banco elegido.')) return;
+    const select = document.querySelector(`select[data-supplier-pay="${control.dataset.id}"]`);
+    await api(`/api/supplier-purchases/${control.dataset.id}/pay`, {
+      method: 'POST',
+      body: { paymentMethod: select?.value || '' },
+    });
+    toast('Factura pagada. El dinero salió del banco.');
+    await render();
+    return;
+  }
   if (action === 'edit-combo') {
     const item = state.products.find((product) => product.id === Number(control.dataset.id) && product.isCombo);
     if (!item) return;
@@ -4502,6 +4695,11 @@ document.addEventListener('change', (event) => {
     refreshPosCart();
   }
   if (event.target.closest('#ticket-form')) updateTotal();
+  const supplierPay = event.target.closest('select[data-supplier-pay]');
+  if (supplierPay) {
+    const purchase = state.supplierPurchases.find((item) => item.id === Number(supplierPay.dataset.supplierPay));
+    if (purchase) purchase.paymentMethod = supplierPay.value;
+  }
   const payment = event.target.closest('select[data-pay]');
   if (payment) {
     api(`/api/purchases/${payment.dataset.pay}/payment`, {
@@ -4529,7 +4727,9 @@ document.addEventListener('change', (event) => {
         if (index >= 0) state.products[index] = { ...state.products[index], ...data.product };
         const board = document.getElementById('inventory-board');
         if (board) board.innerHTML = productListHtml();
-        toast('Imagen cargada. El producto ya sale en la búsqueda rápida.');
+        const combos = document.getElementById('combo-board');
+        if (combos) combos.innerHTML = comboBoardHtml(state.products.filter((product) => product.isCombo));
+        toast(data.product.isCombo ? 'Imagen cargada en el combo.' : 'Imagen cargada. El producto ya sale en la búsqueda rápida.');
       })
       .catch((error) => toast(error.message, 'bad'));
     return;

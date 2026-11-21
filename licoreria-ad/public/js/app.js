@@ -27,7 +27,7 @@ const state = {
   issuedSale: null,
   saleCurrency: 'usd',
   bcvRate: 0,
-  summaryQuery: { preset: 'day', from: '', to: '' },
+  summaryQuery: { preset: 'day', from: '', to: '', fromHour: '', toHour: '' },
   suppliers: [],
   supplierPurchases: [],
   supplierOpen: false,
@@ -155,6 +155,10 @@ function money(cents) {
   return `${formatted} $`;
 }
 
+function moneyPair(cents, bs) {
+  return `<p class="stat-value">${money(cents || 0)}</p><p class="stat-sub">${moneyBs(bs || 0)}</p>`;
+}
+
 function moneyBs(cents) {
   const formatted = (Number(cents) / 100).toLocaleString('es-VE', {
     minimumFractionDigits: 2,
@@ -193,6 +197,30 @@ function acceptsCurrency(product) {
   return product.payUsd !== false;
 }
 
+function sameCode(left, right) {
+  const a = String(left || '').trim().toLocaleLowerCase('es');
+  const b = String(right || '').trim().toLocaleLowerCase('es');
+  return a.length > 0 && a === b;
+}
+
+function combosForProduct(product) {
+  if (!product || product.isCombo || !String(product.code || '').trim()) return [];
+  const selling = currentPath() === '/panel/venta';
+  return state.products.filter((item) => item.isCombo && item.active && sameCode(item.code, product.code) && (!selling || acceptsCurrency(item)));
+}
+
+function linkedCombo(product) {
+  if (!product?.isCombo) return false;
+  const selling = currentPath() === '/panel/venta';
+  return state.products.some((item) => !item.isCombo && item.active && sameCode(item.code, product.code) && (!selling || acceptsCurrency(item)));
+}
+
+function productThumb(product, className = 'thumb') {
+  const letter = esc(String(product?.name || '?').trim().slice(0, 1) || '?');
+  if (!product?.imageUrl) return `<span class="${className} thumb-empty">${letter}</span>`;
+  return `<img class="${className}" alt="" src="${esc(product.imageUrl)}">`;
+}
+
 function formatDateTime(iso) {
   return new Intl.DateTimeFormat('es-ES', {
     day: '2-digit',
@@ -200,7 +228,31 @@ function formatDateTime(iso) {
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    timeZone: 'America/Caracas',
   }).format(new Date(iso));
+}
+
+function formatHour(iso) {
+  if (!iso) return '';
+  return new Intl.DateTimeFormat('es-VE', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    timeZone: 'America/Caracas',
+  }).format(new Date(iso));
+}
+
+function hourOptions(selected) {
+  let html = '<option value="">Cualquiera</option>';
+  for (let hour = 0; hour < 24; hour += 1) {
+    const label = `${String(hour).padStart(2, '0')}:00`;
+    html += `<option value="${hour}" ${String(selected ?? '') === String(hour) ? 'selected' : ''}>${label}</option>`;
+  }
+  return html;
+}
+
+function deliveryItems(sale) {
+  return (sale?.items || []).filter((item) => !item.exploded);
 }
 
 function remaining(iso) {
@@ -454,7 +506,7 @@ function dashboardView() {
     <h2>Resumen</h2>
     <p class="lead page-lead">${esc(dash.label || 'Periodo')} · Tasa BCV ${Number(dash.rate) > 0 ? Number(dash.rate).toLocaleString('es-VE', { maximumFractionDigits: 4 }) : 'sin colocar'}</p>
     <form class="card no-print" data-form="summary" style="margin-bottom:16px">
-      <div class="cart-add">
+      <div class="cart-add summary-filters">
         <label class="field"><span>Periodo</span>
           <select name="preset">
             <option value="hour" ${query.preset === 'hour' ? 'selected' : ''}>Hoy, por hora</option>
@@ -466,9 +518,22 @@ function dashboardView() {
         </label>
         <label class="field"><span>Desde</span><input name="from" type="date" value="${esc(query.from || '')}"></label>
         <label class="field"><span>Hasta</span><input name="to" type="date" value="${esc(query.to || '')}"></label>
+        <label class="field"><span>Desde la hora</span><select name="fromHour">${hourOptions(query.fromHour)}</select></label>
+        <label class="field"><span>Hasta la hora</span><select name="toHour">${hourOptions(query.toHour)}</select></label>
       </div>
+      <p class="hint">La hora es la de Venezuela. Si eliges 20 y 22, entran las ventas de las 20:00 a las 22:59.</p>
       <button class="btn primary" type="submit">Ver rendimiento</button>
     </form>
+    <section class="card global-card">
+      <h3>Global</h3>
+      <p class="hint">Junta las ventas en dólares y en bolívares. La utilidad es esa venta menos los costos y los gastos.</p>
+      <div class="grid-stats">
+        <article class="stat"><p class="stat-label">Venta general</p>${moneyPair(dash.globalSalesCents, dash.globalSalesBs)}</article>
+        <article class="stat"><p class="stat-label">Costos</p>${moneyPair(dash.globalCostCents, dash.globalCostBs)}</article>
+        <article class="stat"><p class="stat-label">Gastos</p>${moneyPair(dash.globalExpensesCents, dash.globalExpensesBs)}</article>
+        <article class="stat"><p class="stat-label">Utilidad</p>${moneyPair(dash.globalProfitCents, dash.globalProfitBs)}</article>
+      </div>
+    </section>
     <div class="grid-stats">
       <article class="stat"><p class="stat-label">Ventas en dólares</p><p class="stat-value">${money(dash.salesCents || 0)}</p></article>
       <article class="stat"><p class="stat-label">Costo en dólares</p><p class="stat-value">${money(dash.costCents || 0)}</p></article>
@@ -666,17 +731,117 @@ function updateProductProfit() {
   const profit = amounts.price - amounts.cost;
   const percent = amounts.price > 0 ? (profit / amounts.price) * 100 : null;
   const percentText = percent == null ? '' : ` · ${percent.toLocaleString('es-ES', { maximumFractionDigits: 1 })} %`;
-  box.textContent = `Utilidad por unidad: ${money(profit)}${percentText}`;
-  box.classList.toggle('loss', profit < 0);
+  const unitText = pairMoney(profit);
+  if (amounts.boxMode && Number.isInteger(amounts.perBox) && amounts.perBox >= 2 && amounts.costRaw != null) {
+    const boxSale = amounts.price * amounts.perBox;
+    const boxProfit = boxSale - amounts.costRaw;
+    const saleText = pairMoney(boxSale);
+    const costText = pairMoney(amounts.costRaw);
+    const profitText = pairMoney(boxProfit);
+    box.textContent = `Utilidad de la caja: ${profitText}. La venta de las ${amounts.perBox} unidades es ${saleText} y el costo de la caja es ${costText}. Por unidad quedan ${unitText}${percentText}.`;
+    box.classList.toggle('loss', boxProfit < 0);
+  } else {
+    box.textContent = `Utilidad por unidad: ${unitText}${percentText}`;
+    box.classList.toggle('loss', profit < 0);
+  }
+  const costLine = document.getElementById('cost-convert');
+  const priceLine = document.getElementById('price-convert');
+  if (costLine) costLine.textContent = amounts.cost == null ? 'Elige la moneda y escribe el costo.' : `Costo por unidad: ${bothMoney(amounts.cost)}`;
+  if (priceLine) priceLine.textContent = amounts.price == null ? 'Elige la moneda y escribe el precio de venta.' : `Venta por unidad: ${bothMoney(amounts.price)}`;
+}
+
+function fieldCurrency(form, name) {
+  return form.querySelector(`[name="${name}"]`)?.value === 'bs' ? 'bs' : 'usd';
+}
+
+function toUsdCents(cents, currency) {
+  if (cents == null) return null;
+  if (currency !== 'bs') return cents;
+  const rate = Number(state.bcvRate);
+  if (!(rate > 0)) return null;
+  return Math.round(cents / rate);
+}
+
+function fromUsdCents(usdCents, currency) {
+  if (usdCents == null) return null;
+  if (currency !== 'bs') return usdCents;
+  return bsCents(usdCents);
+}
+
+function bothMoney(usdCents) {
+  if (usdCents == null) return '';
+  if (!(Number(state.bcvRate) > 0)) return 'Coloca la tasa BCV para ver la conversión.';
+  return `${money(usdCents)} · ${moneyBs(bsCents(usdCents))}`;
+}
+
+function pairMoney(usdCents) {
+  if (usdCents == null) return '';
+  if (!(Number(state.bcvRate) > 0)) return money(usdCents);
+  return `${money(usdCents)} · ${moneyBs(bsCents(usdCents))}`;
+}
+
+function retargetMoney(input, fromCurrency, toCurrency) {
+  if (!input) return;
+  const cents = centsFromInput(input.value);
+  if (cents == null) return;
+  const usd = toUsdCents(cents, fromCurrency);
+  if (usd == null) return;
+  input.value = moneyInput(fromUsdCents(usd, toCurrency));
+}
+
+function convertCurrencyField(target) {
+  const form = target.closest?.('form[data-form="product"]');
+  if (!form || (target.name !== 'costCurrency' && target.name !== 'priceCurrency')) return;
+  const next = target.value === 'bs' ? 'bs' : 'usd';
+  const prev = target.dataset.prev === 'bs' ? 'bs' : 'usd';
+  if (next === prev) return;
+  if (next === 'bs' && !(Number(state.bcvRate) > 0)) {
+    target.value = prev;
+    toast('Coloca la tasa BCV antes de usar bolívares.', 'bad');
+    return;
+  }
+  if (target.name === 'costCurrency') retargetMoney(form.cost, prev, next);
+  else {
+    retargetMoney(form.price, prev, next);
+    retargetMoney(form.boxPrice, prev, next);
+    retargetMoney(form.profit, prev, next);
+  }
+  target.dataset.prev = next;
 }
 
 function unitAmounts(form) {
   const perBox = Number(form.unitsPerBox?.value);
   const boxMode = !state.editingProduct && form.pack?.value === 'box' && Number.isInteger(perBox) && perBox >= 2;
-  let cost = centsFromInput(form.cost?.value);
+  const costCurrency = fieldCurrency(form, 'costCurrency');
+  const priceCurrency = fieldCurrency(form, 'priceCurrency');
+  const costRaw = toUsdCents(centsFromInput(form.cost?.value), costCurrency);
+  let cost = costRaw;
   if (boxMode && cost != null) cost = Math.round(cost / perBox);
-  const price = centsFromInput(form.price?.value);
-  return { cost, price, perBox, boxMode };
+  const price = toUsdCents(centsFromInput(form.price?.value), priceCurrency);
+  return { cost, costRaw, price, perBox, boxMode, costCurrency, priceCurrency };
+}
+
+function writeUnitProfit(form) {
+  if (!form || moneySync || !form.profit) return;
+  const amounts = unitAmounts(form);
+  if (amounts.cost == null || amounts.price == null) return;
+  moneySync = true;
+  form.profit.value = moneyInput(fromUsdCents(amounts.price - amounts.cost, amounts.priceCurrency));
+  moneySync = false;
+}
+
+function refreshProductMoney(target) {
+  const form = target?.closest?.('form[data-form="product"]') || document.querySelector('form[data-form="product"]');
+  if (!form) return;
+  convertCurrencyField(target);
+  const name = target?.name;
+  if (name === 'profit') syncProfitAndPrice(target);
+  else if (name === 'price' || name === 'cost' || name === 'boxPrice') {
+    syncPackPrices(target);
+    syncProfitAndPrice(target);
+  } else writeUnitProfit(form);
+  updateProductProfit();
+  updatePackHint();
 }
 
 let priceSync = false;
@@ -687,15 +852,20 @@ function syncProfitAndPrice(target) {
   if (!form || moneySync || !form.profit) return;
   const name = target?.name;
   if (name !== 'profit' && name !== 'price' && name !== 'cost') return;
-  const cost = centsFromInput(form.cost.value);
+  const costCurrency = fieldCurrency(form, 'costCurrency');
+  const priceCurrency = fieldCurrency(form, 'priceCurrency');
+  const perBox = Number(form.unitsPerBox?.value);
+  const boxMode = !state.editingProduct && form.pack?.value === 'box' && Number.isInteger(perBox) && perBox >= 2;
+  let cost = toUsdCents(centsFromInput(form.cost.value), costCurrency);
   if (cost == null) return;
+  if (boxMode) cost = Math.round(cost / perBox);
   moneySync = true;
   if (name === 'profit') {
-    const profit = centsFromInput(form.profit.value);
-    if (profit != null) form.price.value = moneyInput(cost + profit);
+    const profit = toUsdCents(centsFromInput(form.profit.value), priceCurrency);
+    if (profit != null) form.price.value = moneyInput(fromUsdCents(cost + profit, priceCurrency));
   } else {
-    const price = centsFromInput(form.price.value);
-    if (price != null) form.profit.value = moneyInput(price - cost);
+    const price = toUsdCents(centsFromInput(form.price.value), priceCurrency);
+    if (price != null) form.profit.value = moneyInput(fromUsdCents(price - cost, priceCurrency));
   }
   moneySync = false;
 }
@@ -732,10 +902,10 @@ function updatePackHint() {
   if (boxPriceField) boxPriceField.hidden = !showBoxPrice;
   if (label) label.textContent = boxMode ? 'Cajas' : (state.editingProduct ? 'Existencias en unidades' : 'Existencias');
   const amounts = unitAmounts(form);
-  const unitCost = amounts.cost == null ? '' : `Costo por unidad: ${money(amounts.cost)}. `;
-  const unitPrice = amounts.price == null ? '' : `Venta por unidad: ${money(amounts.price)}. `;
+  const unitCost = amounts.cost == null ? '' : `Costo por unidad: ${bothMoney(amounts.cost) || money(amounts.cost)}. `;
+  const unitPrice = amounts.price == null ? '' : `Venta por unidad: ${bothMoney(amounts.price) || money(amounts.price)}. `;
   const boxPrice = amounts.price != null && Number.isInteger(perBox) && perBox >= 2
-    ? `Venta por caja: ${money(amounts.price * perBox)}. `
+    ? `Venta por caja: ${bothMoney(amounts.price * perBox) || money(amounts.price * perBox)}. `
     : '';
   let stockText = 'Esto queda en unidades. En el visor se vende de una en una.';
   if (state.editingProduct) stockText = 'Al editar, el costo y el precio son por unidad. Para meter cajas usa Sumar.';
@@ -785,10 +955,11 @@ function productListHtml() {
   return `<div class="event-list">${products.map((product) => `
         <article class="event-row ${product.active ? '' : 'inactive'}">
           ${stockMark(product)}
+          ${productThumb(product, 'product-thumb')}
           <div>
             <h3>${product.code ? `${esc(product.code)} · ` : ''}${esc(product.name)}</h3>
-            <p class="price-line">${product.department ? `${esc(product.department)} · ` : ''}Costo ${money(product.costCents)} · Venta ${money(product.priceCents)}${Number(state.bcvRate) > 0 ? ` · ${moneyBs(bsCents(product.priceCents))}` : ''} · ${product.active ? 'A la venta' : 'Inactivo'}</p>
-            <p class="price-line">${product.unitsPerBox > 1 ? `Caja de ${product.unitsPerBox.toLocaleString('es-ES')} unidades · Venta por caja ${money(product.priceCents * product.unitsPerBox)} · ` : ''}Utilidad ${money(product.profitCents)} por unidad · ${money(product.stockProfitCents)} en estas existencias</p>
+            <p class="price-line">${product.department ? `${esc(product.department)} · ` : ''}Costo ${money(product.costCents)}${Number(state.bcvRate) > 0 ? ` · ${moneyBs(bsCents(product.costCents))}` : ''} · Venta ${money(product.priceCents)}${Number(state.bcvRate) > 0 ? ` · ${moneyBs(bsCents(product.priceCents))}` : ''} · ${product.active ? 'A la venta' : 'Inactivo'}</p>
+            <p class="price-line">${product.unitsPerBox > 1 ? `Caja de ${product.unitsPerBox.toLocaleString('es-ES')} unidades · Venta por caja ${money(product.priceCents * product.unitsPerBox)} · ` : ''}${product.quickSale ? 'Búsqueda rápida · ' : ''}Utilidad ${money(product.profitCents)} por unidad · ${money(product.stockProfitCents)} en estas existencias</p>
           </div>
           <div class="row-actions">
             <input class="stock-add" type="number" min="1" max="100000" value="1" data-add-stock="${product.id}" aria-label="Cantidad a sumar de ${esc(product.name)}">
@@ -827,13 +998,24 @@ function inventoryView() {
         <label class="field"><span>Departamento</span><input name="department" maxlength="60" value="${esc(editing?.department || '')}" placeholder="Cerveza, ron, vino"></label>
         <label class="field"><span>Unidades por caja</span><input name="unitsPerBox" type="number" min="1" max="10000" value="${editing ? esc(String(editing.unitsPerBox || 1)) : ''}" placeholder="36"></label>
         ${editing ? '' : `<label class="field"><span>Cómo llega</span><select name="pack"><option value="unit">Por unidad</option><option value="box">Por caja</option></select></label>`}
-        <label class="field"><span id="cost-label">${editing ? 'Costo por unidad' : 'Costo'}</span><input name="cost" inputmode="decimal" required value="${esc(costField)}" placeholder="0,00"></label>
-        <label class="field"><span>Utilidad</span><input name="profit" inputmode="decimal" value="${esc(profitField)}" placeholder="0,00"></label>
-        <label class="field"><span>Precio de venta por unidad</span><input name="price" inputmode="decimal" value="${esc(priceValue)}" placeholder="0,00"></label>
+        <div class="money-line">
+          <label class="field"><span id="cost-label">${editing ? 'Costo por unidad' : 'Costo'}</span><input name="cost" inputmode="decimal" required value="${esc(costField)}" placeholder="0,00"></label>
+          <label class="field"><span>Moneda del costo</span><select name="costCurrency" data-prev="usd"><option value="usd">Dólares</option><option value="bs">Bolívares</option></select></label>
+        </div>
+        <p class="hint" id="cost-convert">Elige la moneda y escribe el costo.</p>
+        <label class="field"><span>Utilidad por unidad</span><input name="profit" inputmode="decimal" value="${esc(profitField)}" placeholder="0,00"></label>
+        <div class="money-line">
+          <label class="field"><span>Precio de venta por unidad</span><input name="price" inputmode="decimal" value="${esc(priceValue)}" placeholder="0,00"></label>
+          <label class="field"><span>Moneda del precio</span><select name="priceCurrency" data-prev="usd"><option value="usd">Dólares</option><option value="bs">Bolívares</option></select></label>
+        </div>
+        <p class="hint" id="price-convert">Elige la moneda y escribe el precio de venta.</p>
         <label class="field" id="box-price-field" ${editing && editing.unitsPerBox > 1 ? '' : 'hidden'}><span>Precio de venta por caja</span><input name="boxPrice" inputmode="decimal" value="${esc(boxPriceValue)}" placeholder="0,00"></label>
         <p class="hint" id="product-profit">Escribe el costo y el precio de venta para ver la utilidad por unidad.</p>
         <label class="field"><span id="stock-label">${editing ? 'Existencias en unidades' : 'Existencias'}</span><input name="stock" type="number" min="0" max="1000000" required value="${esc(stockValue)}" placeholder="0"></label>
         <p class="hint" id="pack-hint">${editing ? 'Al editar, el costo y el precio son por unidad. Para meter cajas usa Sumar.' : 'Si marcas por caja, el costo de la caja se divide entre las unidades.'}</p>
+        <label class="field"><span>Imagen</span><input name="image" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label>
+        ${editing?.imageUrl ? productThumb(editing, 'product-preview') : ''}
+        <label class="check"><input name="quickSale" type="checkbox" ${editing?.quickSale ? 'checked' : ''}><span>Mostrar en la búsqueda rápida de venta</span></label>
         <label class="check"><input name="active" type="checkbox" ${editing ? (editing.active ? 'checked' : '') : 'checked'}><span>Disponible para vender en el visor</span></label>
         <p class="form-error" hidden></p>
         <div class="row-actions">
@@ -855,8 +1037,9 @@ function inventoryView() {
       <section>
         <form class="card product-form" data-form="combo">
           <h2>${combo ? 'Editar combo' : 'Crear combo'}</h2>
-          <p class="lead page-lead">Elige productos y cuántas unidades lleva cada uno. Al vender un combo se cobra este precio y se restan esas unidades del inventario.</p>
-          <label class="field"><span>Nombre del combo</span><input name="name" maxlength="80" required value="${esc(combo?.name || '')}" placeholder="Combo de cervezas"></label>
+          <p class="lead page-lead">Elige productos y cuántas unidades lleva cada uno. Si le pones el código de un producto, en la venta ese producto deja elegir este combo.</p>
+          <label class="field"><span>Nombre del combo</span><input name="name" maxlength="80" required value="${esc(combo?.name || '')}" placeholder="Balde de cerveza"></label>
+          <label class="field"><span>Código del producto</span><select name="code">${productCodeOptions(combo?.code || '')}</select></label>
           <label class="field"><span>Precio de venta</span><input name="price" inputmode="decimal" required value="${esc(combo ? moneyInput(combo.priceCents) : '')}" placeholder="0,00"></label>
           <div class="cart-add">
             <label class="field"><span>Producto</span><select id="combo-product">${comboProductOptions()}</select></label>
@@ -881,6 +1064,22 @@ function inventoryView() {
         <div id="combo-board">${comboBoardHtml(combos)}</div>
       </section>
     </div>`;
+}
+
+function productCodeOptions(selected) {
+  const codes = [];
+  for (const product of state.products) {
+    if (product.isCombo || !String(product.code || '').trim()) continue;
+    if (codes.some((item) => sameCode(item, product.code))) continue;
+    codes.push(product.code.trim());
+  }
+  if (selected && !codes.some((item) => sameCode(item, selected))) codes.push(String(selected).trim());
+  const options = [`<option value="">Sin código de producto</option>`].concat(codes.map((code) => {
+    const product = state.products.find((item) => !item.isCombo && sameCode(item.code, code));
+    const label = product ? `${code} · ${product.name}` : code;
+    return `<option value="${esc(code)}" ${sameCode(code, selected) ? 'selected' : ''}>${esc(label)}</option>`;
+  }));
+  return options.join('');
 }
 
 function comboProductOptions() {
@@ -923,7 +1122,7 @@ function comboListHtml(combos) {
     const recipe = (item.parts || []).map((part) => `${part.quantity} ${esc(part.name)}`).join(' · ') || 'Sin productos';
     return `<article class="event-row ${item.active ? '' : 'inactive'}">
       <div>
-        <h3>${esc(item.name)}</h3>
+        <h3>${item.code ? `${esc(item.code)} · ` : ''}${esc(item.name)}</h3>
         <p class="price-line">Venta ${money(item.priceCents)} · Costo ${money(item.costCents)} · Utilidad ${money(item.profitCents)} · ${[item.payUsd ? 'dólares' : '', item.payBs ? 'bolívares' : ''].filter(Boolean).join(' y ') || 'sin moneda'} · ${item.active ? 'A la venta' : 'Inactivo'}</p>
         <p class="price-line">${recipe}</p>
         <p class="hint">${item.stock > 0 ? `Alcanzan ${item.stock.toLocaleString('es-ES')} combos` : 'No alcanzan las unidades para vender uno'}</p>
@@ -1005,6 +1204,7 @@ function buyMatches(query) {
   return state.products
     .filter((product) => product.active)
     .filter((product) => !selling || acceptsCurrency(product))
+    .filter((product) => !linkedCombo(product))
     .filter((product) => !text || [product.name, product.code].some((value) => String(value || '').toLocaleLowerCase('es').includes(text)))
     .slice(0, 20);
 }
@@ -1030,16 +1230,60 @@ function buyResultsHtml(query) {
   const matches = buyMatches(query);
   if (!matches.length) return `<p class="hint">Ningún producto coincide.</p>`;
   return matches.map((product) => {
+    const choices = combosForProduct(product);
     const recipe = product.isCombo ? (product.parts || []).map((part) => `${part.quantity} ${part.name}`).join(' · ') : '';
     const stock = product.stock < 1
       ? (product.isCombo ? 'faltan unidades' : 'sin existencias')
       : (product.isCombo ? `alcanzan ${product.stock}` : `quedan ${product.stock}`);
+    const canSell = product.stock > 0 || choices.some((item) => item.stock > 0);
+    const comboText = choices.length ? ` · ${choices.length} ${choices.length === 1 ? 'combo' : 'combos'}` : '';
     return `
-    <button class="buy-hit" type="button" data-action="pick-product" data-id="${product.id}" ${product.stock < 1 ? 'disabled' : ''}>
+    <button class="buy-hit" type="button" data-action="${choices.length ? 'open-sale-choice' : 'pick-product'}" data-id="${product.id}" ${canSell ? '' : 'disabled'}>
+      ${productThumb(product, 'choice-thumb')}
       <strong>${product.isCombo ? 'Combo · ' : ''}${esc(product.name)}</strong>
-      <span>${displayMoney(product.priceCents)} · ${stock}${recipe ? ` · ${esc(recipe)}` : ''}</span>
+      <span>${displayMoney(product.priceCents)} · ${stock}${comboText}${recipe ? ` · ${esc(recipe)}` : ''}</span>
     </button>`;
   }).join('');
+}
+
+function quickSaleHtml() {
+  const products = state.products.filter((product) => product.quickSale && product.active && !product.isCombo && acceptsCurrency(product));
+  if (!products.length) return '<p class="hint">En inventario marca los productos que quieres ver aquí y ponles una imagen.</p>';
+  return `<div class="quick-grid">${products.map((product) => {
+    const choices = combosForProduct(product);
+    const canSell = product.stock > 0 || choices.some((item) => item.stock > 0);
+    return `
+      <button class="quick-tile" type="button" data-action="${choices.length ? 'open-sale-choice' : 'pick-product'}" data-id="${product.id}" ${canSell ? '' : 'disabled'}>
+        ${productThumb(product, 'quick-photo')}
+        <strong>${esc(product.name)}</strong>
+        <span>${displayMoney(product.priceCents)}${choices.length ? ` · ${choices.length} combos` : ''}</span>
+      </button>`;
+  }).join('')}</div>`;
+}
+
+function saleChoiceModal(product) {
+  const choices = [product, ...combosForProduct(product)];
+  return `
+    <div class="modal-back" data-action="close-choice">
+      <article class="modal card" data-stop data-modal="sale-choice">
+        <h2>${esc(product.name)}</h2>
+        <p class="hint">Código ${esc(product.code)}. Elige la unidad o uno de sus combos.</p>
+        <div class="choice-list">
+          ${choices.map((item) => {
+            const recipe = item.isCombo ? (item.parts || []).map((part) => `${part.quantity} ${part.name}`).join(' · ') : '';
+            return `
+            <button class="choice-hit" type="button" data-action="pick-product" data-id="${item.id}" ${item.stock < 1 ? 'disabled' : ''}>
+              ${productThumb(item, 'choice-thumb')}
+              <span>
+                <strong>${item.isCombo ? 'Combo · ' : 'Unidad · '}${esc(item.name)}</strong>
+                <small>${displayMoney(item.priceCents)}${recipe ? ` · ${esc(recipe)}` : ''}</small>
+              </span>
+            </button>`;
+          }).join('')}
+        </div>
+        <button class="btn ghost" type="button" data-action="close-choice">Cancelar</button>
+      </article>
+    </div>`;
 }
 
 function cartLinesHtml() {
@@ -1094,19 +1338,127 @@ function supplierOptions() {
   return state.suppliers.map((supplier) => `<option value="${supplier.id}">${esc(supplier.name)}</option>`).join('');
 }
 
+function linePerBox(line) {
+  const perBox = Number(line.unitsPerBox) || 1;
+  return perBox >= 2 ? perBox : 1;
+}
+
+function lineUnits(line) {
+  const quantity = Number(line.quantity);
+  const perBox = linePerBox(line);
+  if (!Number.isInteger(quantity) || quantity < 1) return null;
+  const units = perBox >= 2 ? quantity * perBox : quantity;
+  if (units > 1000000) return null;
+  return units;
+}
+
+function lineCostCents(line) {
+  const quantity = Number(line.quantity);
+  const cost = centsFromInput(line.cost);
+  if (!Number.isInteger(quantity) || quantity < 1 || cost == null) return null;
+  return quantity * cost;
+}
+
+function purchaseUnitCost(line) {
+  const cost = centsFromInput(line.cost);
+  if (cost == null) return null;
+  const perBox = linePerBox(line);
+  return perBox >= 2 ? Math.round(cost / perBox) : cost;
+}
+
+function lineArriveText(line) {
+  const units = lineUnits(line);
+  const perBox = linePerBox(line);
+  if (units == null) return 'Revisa la cantidad.';
+  if (perBox >= 2) {
+    const boxes = Number(line.quantity);
+    const boxWord = boxes === 1 ? 'caja' : 'cajas';
+    return `Llegan ${units.toLocaleString('es-ES')} unidades · ${boxes.toLocaleString('es-ES')} ${boxWord} × ${perBox.toLocaleString('es-ES')}`;
+  }
+  return `Llegan ${units.toLocaleString('es-ES')} ${units === 1 ? 'unidad' : 'unidades'}`;
+}
+
+function purchaseTotalCents() {
+  return state.buyLines.reduce((sum, line) => sum + (lineCostCents(line) || 0), 0);
+}
+
 function purchaseLinesHtml() {
-  if (!state.buyLines.length) return '<p class="hint">Busca un producto y selecciónalo para agregarlo a la factura.</p>';
-  return state.buyLines.map((line) => `
-    <div class="card" data-line="${line.productId}" style="margin-top:10px">
-      <strong>${esc(line.name)}</strong>
-      <div class="cart-add">
-        <label class="field"><span>Cantidad</span><input data-field="quantity" type="number" min="1" value="${esc(line.quantity)}"></label>
-        <label class="field"><span>Costo</span><input data-field="cost" inputmode="decimal" value="${esc(line.cost)}"></label>
-        <label class="field"><span>Utilidad</span><input data-field="profit" inputmode="decimal" value="${esc(line.profit)}"></label>
-        <label class="field"><span>Precio de venta</span><input data-field="price" inputmode="decimal" value="${esc(line.price)}"></label>
+  if (!state.buyLines.length) return '<p class="hint">Busca un producto y selecciónalo. Puedes agregar varios a la misma factura.</p>';
+  return state.buyLines.map((line) => {
+    const cents = lineCostCents(line);
+    const boxed = linePerBox(line) >= 2;
+    return `
+    <div class="card purchase-line" data-line="${line.productId}">
+      <div class="purchase-line-head">
+        <strong>${esc(line.name)}</strong>
+        <span data-line-total>${cents == null ? 'Revisa cantidad y costo' : money(cents)}</span>
       </div>
+      <p class="hint" data-line-arrive>${esc(lineArriveText(line))}</p>
+      <div class="purchase-fields">
+        <label class="field"><span>${boxed ? 'Cajas' : 'Cantidad'}</span><input data-field="quantity" type="number" min="1" value="${esc(line.quantity)}"></label>
+        <label class="field"><span>${boxed ? 'Costo por caja' : 'Costo por unidad'}</span><input data-field="cost" inputmode="decimal" value="${esc(line.cost)}"></label>
+        <label class="field"><span>Utilidad por unidad</span><input data-field="profit" inputmode="decimal" value="${esc(line.profit)}"></label>
+        <label class="field"><span>Precio de venta por unidad</span><input data-field="price" inputmode="decimal" value="${esc(line.price)}"></label>
+      </div>
+      <p class="hint" data-line-math>${cents == null ? '' : `${esc(line.quantity)} × ${esc(line.cost)} $`}</p>
       <button class="btn ghost small" type="button" data-action="remove-buy-line" data-id="${line.productId}">Quitar</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+function purchaseTotalHtml() {
+  const count = state.buyLines.length;
+  const label = count ? `${count} ${count === 1 ? 'producto' : 'productos'}` : 'Total de la factura';
+  return `<div class="total-box" id="purchase-total"><span>${label}</span><strong>${money(purchaseTotalCents())}</strong></div>`;
+}
+
+function refreshPurchaseTotals() {
+  for (const line of state.buyLines) {
+    const row = document.querySelector(`#purchase-lines [data-line="${line.productId}"]`);
+    if (!row) continue;
+    const cents = lineCostCents(line);
+    const total = row.querySelector('[data-line-total]');
+    const math = row.querySelector('[data-line-math]');
+    const arrive = row.querySelector('[data-line-arrive]');
+    if (total) total.textContent = cents == null ? 'Revisa cantidad y costo' : money(cents);
+    if (math) math.textContent = cents == null ? '' : `${line.quantity} × ${line.cost} $`;
+    if (arrive) arrive.textContent = lineArriveText(line);
+  }
+  const box = document.getElementById('purchase-total');
+  if (!box) return;
+  const count = state.buyLines.length;
+  const label = box.querySelector('span');
+  const strong = box.querySelector('strong');
+  if (label) label.textContent = count ? `${count} ${count === 1 ? 'producto' : 'productos'}` : 'Total de la factura';
+  if (strong) strong.textContent = money(purchaseTotalCents());
+}
+
+function addPurchaseProduct(product) {
+  if (!product) return;
+  const current = state.buyLines.find((line) => line.productId === product.id);
+  if (current) {
+    const quantity = Number(current.quantity);
+    current.quantity = String((Number.isInteger(quantity) && quantity >= 1 ? quantity : 0) + 1);
+    const row = document.querySelector(`#purchase-lines [data-line="${product.id}"] [data-field="quantity"]`);
+    if (row) row.value = current.quantity;
+    refreshPurchaseTotals();
+    toast(`Se sumó otra unidad de ${product.name}.`);
+    return;
+  }
+  const perBox = Number(product.unitsPerBox) >= 2 ? Number(product.unitsPerBox) : 1;
+  const profit = product.priceCents - product.costCents;
+  state.buyLines.push({
+    productId: product.id,
+    name: product.name,
+    unitsPerBox: perBox,
+    quantity: '1',
+    cost: moneyInput(perBox >= 2 ? product.costCents * perBox : product.costCents),
+    profit: moneyInput(profit),
+    price: moneyInput(product.priceCents),
+  });
+  const board = document.getElementById('purchase-lines');
+  if (board) board.innerHTML = purchaseLinesHtml();
+  refreshPurchaseTotals();
 }
 
 function purchaseHistoryHtml() {
@@ -1116,7 +1468,9 @@ function purchaseHistoryHtml() {
       <div>
         <h3>${esc(purchase.supplierName)}</h3>
         <p class="price-line">Factura ${esc(purchase.invoiceDate)} · Carga ${formatDateTime(purchase.loadedAt)} · ${esc(paymentLabel(purchase.paymentMethod))}${purchase.dueDate ? ` · Vence ${esc(purchase.dueDate)}` : ''}</p>
-        <p class="hint">${purchase.items.map((item) => `${item.quantity} ${esc(item.productName)}`).join(' · ')}</p>
+        <p class="hint">${purchase.items.map((item) => item.packCount
+          ? `${item.packCount} cajas de ${esc(item.productName)} · llegan ${item.quantity.toLocaleString('es-ES')} unidades · ${money(item.totalCents)}`
+          : `${item.quantity} ${esc(item.productName)} · ${money(item.totalCents)}`).join(' · ')}</p>
       </div>
       <strong>${money(purchase.totalCents)}</strong>
     </article>`).join('')}</div>`;
@@ -1152,9 +1506,11 @@ function comprasView() {
           <label class="field"><span>Vencimiento</span><input name="dueDate" type="date"></label>
         </div>
         <label class="field"><span>Método de pago</span><select name="paymentMethod">${paymentOptions('efectivo')}</select></label>
-        <label class="field"><span>Buscar producto</span><input id="purchase-search" type="search" placeholder="Código o nombre" autocomplete="off"></label>
+        <label class="field"><span>Buscar producto</span><input id="purchase-search" type="search" placeholder="Código o nombre. Puedes agregar varios." autocomplete="off"></label>
+        <p class="hint">Elige uno y sigue buscando. Si el producto viene por caja, la cantidad son cajas y el inventario recibe todas las unidades.</p>
         <div id="purchase-results" class="buy-results"></div>
         <div id="purchase-lines">${purchaseLinesHtml()}</div>
+        ${purchaseTotalHtml()}
         <p class="form-error" hidden></p>
         <button class="btn primary" type="submit">Guardar compra</button>
       </form>
@@ -1180,7 +1536,7 @@ function purchaseResultsHtml(query) {
   return matches.map((product) => `
     <button class="buy-hit" type="button" data-action="pick-purchase" data-id="${product.id}">
       <strong>${product.code ? `${esc(product.code)} · ` : ''}${esc(product.name)}</strong>
-      <span>Costo ${money(product.costCents)} · Venta ${money(product.priceCents)} · quedan ${product.stock}</span>
+      <span>${product.unitsPerBox > 1 ? `Caja de ${product.unitsPerBox} · ` : ''}Costo ${money(product.costCents)} · Venta ${money(product.priceCents)} · quedan ${product.stock}</span>
     </button>`).join('');
 }
 
@@ -1265,8 +1621,10 @@ function posView() {
       <section class="card">
         <label class="field"><span>Cliente</span><input id="pos-name" maxlength="80" placeholder="Nombre de quien compra" autocomplete="off"></label>
         <label class="field"><span>Método de pago</span><select id="pos-pay">${paymentOptions('efectivo')}</select></label>
+        <p class="hint">Búsqueda rápida</p>
+        <div id="quick-sale">${quickSaleHtml()}</div>
         <div class="cart-add">
-          <label class="field"><span>Producto</span><input id="pos-search" type="search" placeholder="Escribe y aparecen los productos" autocomplete="off"></label>
+          <label class="field"><span>Producto</span><input id="pos-search" type="search" placeholder="Escribe el producto. Si tiene combos, eliges cuál vender." autocomplete="off"></label>
           <label class="field"><span>Cantidad</span><input id="pos-qty" type="number" min="1" max="500" value="1"></label>
         </div>
         <div id="pos-results" class="buy-results">${buyResultsHtml('')}</div>
@@ -1479,7 +1837,7 @@ function barraBoardHtml() {
     return `<div class="empty"><h3>${state.barraQuery ? 'Ninguna factura coincide' : 'Todavía no hay pedidos de barra'}</h3><p class="lead">${state.barraQuery ? 'Prueba con otro nombre o número.' : 'Cuando una venta pase a barra, aparece aquí.'}</p></div>`;
   }
   return state.barra.map((sale) => {
-    const products = (sale.items || []).map((item) => `${item.remaining} de ${item.quantity} ${item.productName}`).join(' · ');
+    const products = deliveryItems(sale).map((item) => `${item.remaining} de ${item.quantity} ${item.productName}`).join(' · ');
     const status = sale.refundedAt ? 'Devuelta' : paymentLabel(sale.paymentMethod);
     return `
       <button class="sale-hit" type="button" data-action="open-barra" data-id="${sale.id}">
@@ -1489,29 +1847,48 @@ function barraBoardHtml() {
   }).join('');
 }
 
+function unitMarkup(number, delivered, at) {
+  const time = delivered ? formatHour(at) : '';
+  if (!time) return String(number);
+  return `<span class="unit-n">${number}</span><span class="unit-time">${esc(time)}</span>`;
+}
+
 function invoiceUnits(item, interactive) {
   const done = new Set(item.deliveredUnits || []);
   const picked = new Set(state.barraPicks[item.id] || []);
+  const times = item.deliveredAt || {};
   let html = '';
   for (let number = 1; number <= item.quantity; number += 1) {
     const delivered = done.has(number);
     const selected = picked.has(number);
+    const face = unitMarkup(number, delivered, times[number]);
+    const timed = delivered && times[number] ? ' has-time' : '';
     if (!interactive) {
-      html += `<span class="unit ${delivered ? 'done' : 'free'}">${number}</span>`;
+      html += `<span class="unit ${delivered ? 'done' : 'free'}${timed}">${face}</span>`;
       continue;
     }
-    html += `<button class="unit ${delivered ? 'done' : selected ? 'pick' : 'free'}" type="button" data-action="toggle-invoice-unit" data-item="${item.id}" data-n="${number}" ${delivered ? 'disabled' : ''}>${number}</button>`;
+    html += `<button class="unit ${delivered ? 'done' : selected ? 'pick' : 'free'}${timed}" type="button" data-action="toggle-invoice-unit" data-item="${item.id}" data-n="${number}" ${delivered ? 'disabled' : ''}>${face}</button>`;
   }
   return html;
 }
 
 function barraLinesHtml(sale, interactive) {
-  return (sale.items || []).map((item) => `
+  return deliveryItems(sale).map((item) => {
+    const open = item.parts?.length
+      ? item.parts.map((part) => `${part.quantity * item.quantity} ${part.name}`).join(', ')
+      : '';
+    const split = interactive && !sale.refundedAt && item.canSplit
+      ? `<button class="btn ghost small" type="button" data-action="split-invoice-item" data-id="${sale.id}" data-item="${item.id}">Desglosar</button>`
+      : '';
+    return `
     <section class="paper" style="margin-top:12px">
       <p class="paper-kicker">${esc(item.productName)}</p>
       <p class="hint">${item.quantity} en la factura · Entregadas ${item.delivered} · Quedan ${item.remaining}</p>
+      ${open ? `<p class="hint">Al desglosar queda en ${esc(open)}.</p>` : ''}
       <div class="unit-grid">${invoiceUnits(item, interactive && !sale.refundedAt)}</div>
-    </section>`).join('');
+      ${split ? `<div class="row-actions" style="margin-top:10px">${split}</div>` : ''}
+    </section>`;
+  }).join('');
 }
 
 function barraModal() {
@@ -1589,8 +1966,9 @@ function facturaView(sale) {
 
 function facturaBody(sale) {
   if (!sale) return `<div class="empty"><h2>No está esa factura</h2><p class="lead">El QR no corresponde a una venta de ${esc(negocio.name)}.</p></div>`;
-  const pending = (sale.items || []).reduce((sum, item) => sum + item.remaining, 0);
-  const delivered = (sale.items || []).reduce((sum, item) => sum + item.delivered, 0);
+  const lines = deliveryItems(sale);
+  const pending = lines.reduce((sum, item) => sum + item.remaining, 0);
+  const delivered = lines.reduce((sum, item) => sum + item.delivered, 0);
   return `
     <p class="eyebrow">Factura ${esc(sale.numberLabel)}</p>
     <h1 style="font-size:42px">${esc(sale.customerName)}</h1>
@@ -1622,10 +2000,12 @@ function findSale(itemId) {
   return null;
 }
 
-function unitButton(number, delivered, selected) {
+function unitButton(number, delivered, selected, at) {
   const kind = delivered ? 'done' : selected ? 'pick' : 'free';
   const label = delivered ? 'Entregado' : selected ? 'Seleccionado' : 'Disponible';
-  return `<button class="unit ${kind}" type="button" data-action="toggle-unit" data-n="${number}" ${delivered ? 'disabled' : ''} aria-label="Número ${number}, ${label}">${number}</button>`;
+  const time = delivered ? formatHour(at) : '';
+  const timed = time ? ' has-time' : '';
+  return `<button class="unit ${kind}${timed}" type="button" data-action="toggle-unit" data-n="${number}" ${delivered ? 'disabled' : ''} aria-label="Número ${number}, ${label}${time ? `, ${time}` : ''}">${unitMarkup(number, delivered, at)}</button>`;
 }
 
 function sheetGrid() {
@@ -1634,7 +2014,7 @@ function sheetGrid() {
   const done = new Set(sheet.deliveredUnits || []);
   const picked = new Set(sheet.selected || []);
   let html = '';
-  for (let number = 1; number <= sheet.quantity; number += 1) html += unitButton(number, done.has(number), picked.has(number));
+  for (let number = 1; number <= sheet.quantity; number += 1) html += unitButton(number, done.has(number), picked.has(number), sheet.deliveredAt?.[number]);
   return html;
 }
 
@@ -2598,7 +2978,13 @@ async function render() {
     if (path === '/panel') {
       mount(shell(loading()));
       const query = state.summaryQuery;
-      const params = new URLSearchParams({ preset: query.preset || 'day', from: query.from || '', to: query.to || '' });
+      const params = new URLSearchParams({
+        preset: query.preset || 'day',
+        from: query.from || '',
+        to: query.to || '',
+        fromHour: query.fromHour ?? '',
+        toHour: query.toHour ?? '',
+      });
       state.dash = await api(`/api/summary?${params}`);
       if (token !== renderToken) return;
       mount(shell(dashboardView()));
@@ -2914,11 +3300,14 @@ async function onSubmit(event) {
         name: values.name,
         department: values.department,
         cost: values.cost,
+        costCurrency: values.costCurrency || 'usd',
         profit: values.profit,
         price: values.price,
+        priceCurrency: values.priceCurrency || 'usd',
         stock: Number(values.stock),
         unitsPerBox: values.unitsPerBox === '' ? 1 : Number(values.unitsPerBox),
         active: Boolean(form.querySelector('input[name="active"]')?.checked),
+        quickSale: Boolean(form.querySelector('input[name="quickSale"]')?.checked),
       };
       if (!state.editingProduct) body.pack = form.pack?.value || 'unit';
       if (!state.editingProduct) body.boxPrice = values.boxPrice || '';
@@ -2927,8 +3316,23 @@ async function onSubmit(event) {
         return;
       }
       if (!values.price && values.boxPrice && body.unitsPerBox >= 2) body.price = '';
-      if (state.editingProduct) await api(`/api/products/${state.editingProduct.id}`, { method: 'PATCH', body });
-      else await api('/api/products', { method: 'POST', body });
+      if ((values.costCurrency === 'bs' || values.priceCurrency === 'bs') && !(Number(state.bcvRate) > 0)) {
+        setFormError(form, 'Coloca la tasa BCV antes de anotar un monto en bolívares.');
+        return;
+      }
+      const image = form.querySelector('input[name="image"]')?.files?.[0];
+      if (image && image.size > 8 * 1024 * 1024) {
+        setFormError(form, 'La imagen debe pesar 8 MB o menos.');
+        return;
+      }
+      const saved = state.editingProduct
+        ? await api(`/api/products/${state.editingProduct.id}`, { method: 'PATCH', body })
+        : await api('/api/products', { method: 'POST', body });
+      if (image) {
+        const fileBody = new FormData();
+        fileBody.set('file', image);
+        await apiForm(`/api/products/${saved.product.id}/image`, fileBody);
+      }
       state.editingProduct = null;
       toast('Inventario actualizado.');
       await render();
@@ -2947,6 +3351,7 @@ async function onSubmit(event) {
       }
       const body = {
         name: values.name,
+        code: values.code || '',
         price: values.price,
         active: Boolean(form.querySelector('input[name="active"]')?.checked),
         payUsd,
@@ -2962,7 +3367,13 @@ async function onSubmit(event) {
       return;
     }
     if (kind === 'summary') {
-      state.summaryQuery = { preset: values.preset || 'day', from: values.from || '', to: values.to || '' };
+      state.summaryQuery = {
+        preset: values.preset || 'day',
+        from: values.from || '',
+        to: values.to || '',
+        fromHour: values.fromHour || '',
+        toHour: values.toHour || '',
+      };
       await render();
       return;
     }
@@ -2976,6 +3387,10 @@ async function onSubmit(event) {
     if (kind === 'supplier-purchase') {
       if (!state.buyLines.length) {
         setFormError(form, 'Agrega al menos un producto.');
+        return;
+      }
+      if (state.buyLines.some((line) => lineUnits(line) == null || lineCostCents(line) == null)) {
+        setFormError(form, 'Revisa la cantidad y el costo de cada producto.');
         return;
       }
       await api('/api/supplier-purchases', {
@@ -3151,6 +3566,18 @@ async function onClick(event) {
     document.querySelector('.modal-back')?.remove();
     return;
   }
+  if (action === 'close-choice') {
+    document.querySelector('[data-modal="sale-choice"]')?.closest('.modal-back')?.remove();
+    return;
+  }
+  if (action === 'open-sale-choice') {
+    const product = state.products.find((item) => item.id === Number(control.dataset.id));
+    if (!product) return;
+    document.querySelector('[data-modal="sale-choice"]')?.closest('.modal-back')?.remove();
+    const host = document.querySelector('.shell') || document.body;
+    host.insertAdjacentHTML('beforeend', saleChoiceModal(product));
+    return;
+  }
   if (action === 'pick-product') {
     const product = state.products.find((item) => item.id === Number(control.dataset.id));
     const quantity = Number(document.querySelector('#pos-qty')?.value || document.querySelector('#buy-qty')?.value);
@@ -3179,6 +3606,7 @@ async function onClick(event) {
     const current = state.cart.find((line) => line.productId === product.id);
     if (current) current.quantity += quantity;
     else state.cart.push({ productId: product.id, name: product.name, priceCents: product.priceCents, quantity });
+    document.querySelector('[data-modal="sale-choice"]')?.closest('.modal-back')?.remove();
     refreshBuyCart();
     refreshPosCart();
     return;
@@ -3208,29 +3636,19 @@ async function onClick(event) {
     return;
   }
   if (action === 'pick-purchase') {
-    const product = state.products.find((item) => item.id === Number(control.dataset.id));
-    if (!product) return;
-    if (state.buyLines.some((line) => line.productId === product.id)) {
-      toast('Ese producto ya está en la factura.', 'bad');
-      return;
-    }
-    const profit = product.priceCents - product.costCents;
-    state.buyLines.push({
-      productId: product.id,
-      name: product.name,
-      quantity: '1',
-      cost: moneyInput(product.costCents),
-      profit: moneyInput(profit),
-      price: moneyInput(product.priceCents),
-    });
-    const board = document.getElementById('purchase-lines');
-    if (board) board.innerHTML = purchaseLinesHtml();
+    addPurchaseProduct(state.products.find((item) => item.id === Number(control.dataset.id)));
+    const search = document.getElementById('purchase-search');
+    const results = document.getElementById('purchase-results');
+    if (search) search.value = '';
+    if (results) results.innerHTML = '';
+    search?.focus();
     return;
   }
   if (action === 'remove-buy-line') {
     state.buyLines = state.buyLines.filter((line) => line.productId !== Number(control.dataset.id));
     const board = document.getElementById('purchase-lines');
     if (board) board.innerHTML = purchaseLinesHtml();
+    refreshPurchaseTotals();
     return;
   }
   if (action === 'stock-move') {
@@ -3381,6 +3799,26 @@ async function onClick(event) {
     else current.add(number);
     state.barraPicks[itemId] = [...current];
     paintBarraModal();
+    return;
+  }
+  if (action === 'split-invoice-item') {
+    const item = deliveryItems(state.barraSale).find((line) => line.id === Number(control.dataset.item));
+    const open = item?.parts?.map((part) => `${part.quantity * item.quantity} ${part.name}`).join(', ') || 'sus unidades';
+    if (!confirm(`¿Desglosar ${item?.productName || 'este combo'} en ${open}? Después cada unidad se entrega por separado y el total de la factura no cambia.`)) return;
+    control.disabled = true;
+    try {
+      const data = await api(`/api/invoices/${control.dataset.id}/items/${control.dataset.item}/split`, { method: 'POST', body: {} });
+      state.barraSale = data.sale;
+      state.barraPicks = {};
+      state.barra = state.barra.map((sale) => (sale.id === data.sale.id ? { ...sale, ...data.sale } : sale));
+      const board = document.getElementById('barra-board');
+      if (board) board.innerHTML = barraBoardHtml();
+      paintBarraModal();
+      toast('Combo desglosado. Ya puedes entregar cada unidad.');
+    } catch (error) {
+      toast(error.message, 'bad');
+      if (document.body.contains(control)) control.disabled = false;
+    }
     return;
   }
   if (action === 'deliver-invoice') {
@@ -3698,37 +4136,47 @@ document.addEventListener('click', (event) => {
 document.addEventListener('submit', (event) => {
   onSubmit(event).catch((error) => toast(error.message || 'No se pudo completar la acción.', 'bad'));
 });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  const form = event.target.closest?.('form[data-form="supplier-purchase"]');
+  if (!form || event.target.closest('button[type="submit"]')) return;
+  event.preventDefault();
+  if (event.target.id !== 'purchase-search') return;
+  const matches = purchaseMatches(event.target.value);
+  if (matches.length === 1) {
+    addPurchaseProduct(matches[0]);
+    event.target.value = '';
+    const results = document.getElementById('purchase-results');
+    if (results) results.innerHTML = '';
+  } else if (matches.length > 1) toast('Elige el producto en la lista para agregarlo.', 'bad');
+});
 document.addEventListener('input', (event) => {
   if (event.target.closest('#ticket-form')) updateTotal();
-  if (event.target.closest('form[data-form="product"]')) {
-    syncProfitAndPrice(event.target);
-    syncPackPrices(event.target);
-    updateProductProfit();
-    updatePackHint();
-  }
+  if (event.target.closest('form[data-form="product"]')) refreshProductMoney(event.target);
   const buyField = event.target.closest('#purchase-lines [data-field]');
   if (buyField) {
     const row = buyField.closest('[data-line]');
     const line = state.buyLines.find((item) => item.productId === Number(row?.dataset.line));
     if (line) {
       line[buyField.dataset.field] = buyField.value;
-      const cost = centsFromInput(line.cost);
-      if (buyField.dataset.field === 'price' && cost != null) {
+      const unitCost = purchaseUnitCost(line);
+      if (buyField.dataset.field === 'price' && unitCost != null) {
         const price = centsFromInput(line.price);
         if (price != null) {
-          line.profit = moneyInput(price - cost);
+          line.profit = moneyInput(price - unitCost);
           const profit = row.querySelector('[data-field="profit"]');
           if (profit) profit.value = line.profit;
         }
       }
-      if ((buyField.dataset.field === 'profit' || buyField.dataset.field === 'cost') && cost != null) {
+      if ((buyField.dataset.field === 'profit' || buyField.dataset.field === 'cost') && unitCost != null) {
         const profit = centsFromInput(line.profit);
         if (profit != null) {
-          line.price = moneyInput(cost + profit);
+          line.price = moneyInput(unitCost + profit);
           const price = row.querySelector('[data-field="price"]');
           if (price) price.value = line.price;
         }
       }
+      refreshPurchaseTotals();
     }
   }
   if (event.target.id === 'purchase-search') {
@@ -3787,12 +4235,7 @@ document.addEventListener('change', (event) => {
     render().catch((error) => toast(error.message, 'bad'));
     return;
   }
-  if (event.target.closest('form[data-form="product"]')) {
-    syncProfitAndPrice(event.target);
-    syncPackPrices(event.target);
-    updatePackHint();
-    updateProductProfit();
-  }
+  if (event.target.closest('form[data-form="product"]')) refreshProductMoney(event.target);
   if (event.target.id === 'pos-currency') {
     state.saleCurrency = event.target.value === 'bs' ? 'bs' : 'usd';
     state.cart = state.cart.filter((line) => {
@@ -3801,6 +4244,8 @@ document.addEventListener('change', (event) => {
     });
     const box = document.getElementById('pos-results');
     if (box) box.innerHTML = buyResultsHtml(document.getElementById('pos-search')?.value || '');
+    const quick = document.getElementById('quick-sale');
+    if (quick) quick.innerHTML = quickSaleHtml();
     refreshPosCart();
   }
   if (event.target.closest('#ticket-form')) updateTotal();

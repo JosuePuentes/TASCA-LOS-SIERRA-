@@ -19,8 +19,10 @@ const dataDir = onVercel
   : path.join(process.env.LOCALAPPDATA || path.join(__dirname, 'data'), 'LicoreriaAD');
 const mediaDir = path.join(dataDir, 'uploads', 'media');
 const receiptDir = path.join(dataDir, 'uploads', 'receipts');
+const productImageDir = path.join(dataDir, 'uploads', 'products');
 fs.mkdirSync(mediaDir, { recursive: true });
 fs.mkdirSync(receiptDir, { recursive: true });
+fs.mkdirSync(productImageDir, { recursive: true });
 const dbPath = path.join(dataDir, 'negocio.db');
 
 function cleanHost(value) {
@@ -255,6 +257,8 @@ if (!columnNames('products').includes('code')) db.exec('ALTER TABLE products ADD
 if (!columnNames('products').includes('department')) db.exec('ALTER TABLE products ADD COLUMN department TEXT');
 if (!columnNames('products').includes('pay_usd')) db.exec('ALTER TABLE products ADD COLUMN pay_usd INTEGER NOT NULL DEFAULT 1');
 if (!columnNames('products').includes('pay_bs')) db.exec('ALTER TABLE products ADD COLUMN pay_bs INTEGER NOT NULL DEFAULT 1');
+if (!columnNames('products').includes('image_file')) db.exec('ALTER TABLE products ADD COLUMN image_file TEXT');
+if (!columnNames('products').includes('quick_sale')) db.exec('ALTER TABLE products ADD COLUMN quick_sale INTEGER NOT NULL DEFAULT 0');
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -288,6 +292,8 @@ db.exec(`
     quantity INTEGER NOT NULL,
     cost_cents INTEGER NOT NULL,
     price_cents INTEGER NOT NULL,
+    pack_count INTEGER,
+    pack_cost_cents INTEGER,
     FOREIGN KEY (purchase_id) REFERENCES supplier_purchases(id),
     FOREIGN KEY (product_id) REFERENCES products(id)
   );
@@ -314,6 +320,12 @@ if (!columnNames('purchase_items').includes('delivered_marks')) {
 }
 if (!columnNames('purchases').includes('refunded_at')) {
   db.exec('ALTER TABLE purchases ADD COLUMN refunded_at TEXT');
+}
+if (!columnNames('supplier_purchase_items').includes('pack_count')) {
+  db.exec('ALTER TABLE supplier_purchase_items ADD COLUMN pack_count INTEGER');
+}
+if (!columnNames('supplier_purchase_items').includes('pack_cost_cents')) {
+  db.exec('ALTER TABLE supplier_purchase_items ADD COLUMN pack_cost_cents INTEGER');
 }
 db.exec(`
   CREATE TABLE IF NOT EXISTS invoices (
@@ -346,6 +358,9 @@ if (!columnNames('invoices').includes('currency')) db.exec(`ALTER TABLE invoices
 if (!columnNames('invoices').includes('bcv_rate')) db.exec('ALTER TABLE invoices ADD COLUMN bcv_rate REAL NOT NULL DEFAULT 0');
 if (!columnNames('invoices').includes('channel')) db.exec(`ALTER TABLE invoices ADD COLUMN channel TEXT NOT NULL DEFAULT 'barra'`);
 if (!columnNames('invoice_items').includes('delivered_marks')) db.exec('ALTER TABLE invoice_items ADD COLUMN delivered_marks TEXT');
+if (!columnNames('invoice_items').includes('combo_parts')) db.exec('ALTER TABLE invoice_items ADD COLUMN combo_parts TEXT');
+if (!columnNames('invoice_items').includes('exploded_at')) db.exec('ALTER TABLE invoice_items ADD COLUMN exploded_at TEXT');
+if (!columnNames('invoice_items').includes('source_item_id')) db.exec('ALTER TABLE invoice_items ADD COLUMN source_item_id INTEGER');
 if (!columnNames('movements').includes('invoice_id')) {
   db.exec('ALTER TABLE movements ADD COLUMN invoice_id INTEGER');
 }
@@ -453,6 +468,21 @@ function toCents(value) {
   return Math.round(Number(text) * 100);
 }
 
+function currencyOf(value) {
+  return value === 'bs' ? 'bs' : 'usd';
+}
+
+function pricedInUsd(raw, currency) {
+  const cents = toCents(raw);
+  if (cents == null) return { cents: null };
+  if (currencyOf(currency) !== 'bs') return { cents };
+  const rate = currentRate();
+  if (!(rate > 0)) return { error: 'Coloca la tasa BCV antes de anotar un monto en bolívares.' };
+  const usd = Math.round(cents / rate);
+  if (usd > 10000000) return { error: 'Ese monto en bolívares queda demasiado alto en dólares.' };
+  return { cents: usd };
+}
+
 function normalizeCode(raw) {
   const text = String(raw || '').trim().toUpperCase();
   const prefix = activeTenant().codePrefix;
@@ -538,6 +568,8 @@ function presentProduct(row) {
     isCombo: Boolean(row.is_combo),
     code: row.code || '',
     department: row.department || '',
+    imageUrl: row.image_file ? `/api/products/${num(row.id)}/image?v=${encodeURIComponent(row.image_file)}` : '',
+    quickSale: Boolean(row.quick_sale),
     payUsd: row.is_combo ? Boolean(row.pay_usd) : true,
     payBs: row.is_combo ? Boolean(row.pay_bs) : true,
     createdAt: row.created_at,
@@ -608,7 +640,32 @@ function saveComboParts(comboId, parts) {
   for (const part of parts) insert.run(comboId, part.productId, part.quantity);
 }
 
-function marksFor(row) {
+function itemParts(row) {
+  if (row.combo_parts) {
+    try {
+      const parsed = JSON.parse(row.combo_parts);
+      if (Array.isArray(parsed)) {
+        return parsed.map((part) => ({
+          productId: num(part.productId),
+          name: String(part.name || '').trim(),
+          quantity: num(part.quantity),
+        })).filter((part) => part.productId && part.name && part.quantity > 0);
+      }
+    } catch {
+      // Si la receta guardada no se lee, se usa la actual.
+    }
+  }
+  if (row.source_item_id || row.exploded_at) return [];
+  const product = db.prepare('SELECT is_combo FROM products WHERE id = ?').get(row.product_id);
+  if (!product || !flagOn(product.is_combo)) return [];
+  return comboParts(row.product_id).map((part) => ({
+    productId: part.productId,
+    name: part.name,
+    quantity: part.quantity,
+  }));
+}
+
+function readMarks(row) {
   const quantity = num(row.quantity);
   const delivered = Math.min(num(row.delivered), quantity);
   const marks = [];
@@ -618,9 +675,10 @@ function marksFor(row) {
       const parsed = JSON.parse(row.delivered_marks);
       if (Array.isArray(parsed)) {
         for (const value of parsed) {
-          const number = Number(value);
+          const number = Number(value?.n ?? value);
+          const at = typeof value?.at === 'string' ? value.at : '';
           if (!Number.isInteger(number) || number < 1 || number > quantity || seen.has(number)) continue;
-          marks.push(number);
+          marks.push({ n: number, at });
           seen.add(number);
         }
       }
@@ -632,18 +690,34 @@ function marksFor(row) {
   if (marks.length < delivered) {
     for (let number = 1; number <= quantity && marks.length < delivered; number += 1) {
       if (seen.has(number)) continue;
-      marks.push(number);
+      marks.push({ n: number, at: '' });
       seen.add(number);
     }
   }
-  marks.sort((left, right) => left - right);
+  marks.sort((left, right) => left.n - right.n);
   return marks;
+}
+
+function marksFor(row) {
+  return readMarks(row).map((mark) => mark.n);
+}
+
+function withDeliveryTime(row, picked, at) {
+  return [...readMarks(row), ...picked.map((number) => ({ n: number, at }))].sort((left, right) => left.n - right.n);
 }
 
 function presentItem(row) {
   const quantity = num(row.quantity);
-  const deliveredUnits = marksFor(row);
+  const marks = readMarks(row);
+  const deliveredUnits = marks.map((mark) => mark.n);
   const delivered = deliveredUnits.length;
+  const deliveredAt = {};
+  for (const mark of marks) {
+    if (mark.at) deliveredAt[mark.n] = mark.at;
+  }
+  const parts = itemParts(row);
+  const exploded = Boolean(row.exploded_at);
+  const sourceItemId = num(row.source_item_id);
   return {
     id: num(row.id),
     purchaseId: num(row.purchase_id),
@@ -653,8 +727,13 @@ function presentItem(row) {
     quantity,
     delivered,
     deliveredUnits,
+    deliveredAt,
     remaining: quantity - delivered,
     totalCents: quantity * num(row.unit_price_cents),
+    exploded,
+    sourceItemId,
+    parts,
+    canSplit: !exploded && !sourceItemId && delivered === 0 && parts.length > 0,
   };
 }
 
@@ -759,6 +838,136 @@ function parseDay(str) {
   const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
   if (date.getFullYear() !== Number(match[1]) || date.getMonth() !== Number(match[2]) - 1) return null;
   return date;
+}
+
+function businessParts(date) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Caracas',
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const bag = {};
+  for (const part of fmt.formatToParts(date)) {
+    if (part.type !== 'literal') bag[part.type] = part.value;
+  }
+  let hour = Number(bag.hour);
+  if (hour === 24) hour = 0;
+  return {
+    year: Number(bag.year),
+    month: Number(bag.month),
+    day: Number(bag.day),
+    hour,
+    minute: Number(bag.minute),
+  };
+}
+
+function businessInstant(year, month, day, hour = 0, minute = 0) {
+  return new Date(Date.UTC(year, month - 1, day, hour + 4, minute));
+}
+
+function shiftDate(year, month, day, days) {
+  const utc = new Date(Date.UTC(year, month - 1, day + days));
+  return { year: utc.getUTCFullYear(), month: utc.getUTCMonth() + 1, day: utc.getUTCDate() };
+}
+
+function businessYmd(date) {
+  const parts = businessParts(date);
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+}
+
+function parseHour(value) {
+  if (value == null || value === '') return null;
+  const hour = Number(value);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+    const error = new Error('Elige una hora entre 00 y 23.');
+    error.status = 400;
+    throw error;
+  }
+  return hour;
+}
+
+function hoursInWindow(fromHour, toHour) {
+  if (fromHour == null && toHour == null) return Array.from({ length: 24 }, (_, hour) => hour);
+  const start = fromHour == null ? 0 : fromHour;
+  const end = toHour == null ? 23 : toHour;
+  const hours = [];
+  if (start <= end) {
+    for (let hour = start; hour <= end; hour += 1) hours.push(hour);
+  } else {
+    for (let hour = start; hour <= 23; hour += 1) hours.push(hour);
+    for (let hour = 0; hour <= end; hour += 1) hours.push(hour);
+  }
+  return hours;
+}
+
+function matchesHour(iso, fromHour, toHour) {
+  if (fromHour == null && toHour == null) return true;
+  const hour = businessParts(new Date(iso)).hour;
+  return hoursInWindow(fromHour, toHour).includes(hour);
+}
+
+function hourWindowLabel(fromHour, toHour) {
+  if (fromHour == null && toHour == null) return '';
+  const start = `${String(fromHour == null ? 0 : fromHour).padStart(2, '0')}:00`;
+  const end = `${String(toHour == null ? 23 : toHour).padStart(2, '0')}:59`;
+  return `${start}–${end}`;
+}
+
+function businessRange(preset, fromStr, toStr) {
+  const today = businessParts(new Date());
+  const atStart = (parts) => businessInstant(parts.year, parts.month, parts.day);
+  if (preset === 'day' || preset === 'hour') {
+    const next = shiftDate(today.year, today.month, today.day, 1);
+    return { from: atStart(today), to: businessInstant(next.year, next.month, next.day) };
+  }
+  if (preset === 'week') {
+    const index = new Date(Date.UTC(today.year, today.month - 1, today.day, 16)).getUTCDay();
+    const diff = index === 0 ? 6 : index - 1;
+    const monday = shiftDate(today.year, today.month, today.day, -diff);
+    const next = shiftDate(monday.year, monday.month, monday.day, 7);
+    return { from: businessInstant(monday.year, monday.month, monday.day), to: businessInstant(next.year, next.month, next.day) };
+  }
+  if (preset === 'month') {
+    const nextMonth = today.month === 12
+      ? { year: today.year + 1, month: 1, day: 1 }
+      : { year: today.year, month: today.month + 1, day: 1 };
+    return { from: businessInstant(today.year, today.month, 1), to: businessInstant(nextMonth.year, nextMonth.month, 1) };
+  }
+  if (preset === 'year') {
+    return { from: businessInstant(today.year, 1, 1), to: businessInstant(today.year + 1, 1, 1) };
+  }
+  if (preset === 'custom') {
+    const from = parseDay(fromStr);
+    const end = parseDay(toStr);
+    if (!from || !end) {
+      const error = new Error('Elige la fecha de inicio y la fecha de fin.');
+      error.status = 400;
+      throw error;
+    }
+    if (end < from) {
+      const error = new Error('La fecha final tiene que ser igual o posterior a la inicial.');
+      error.status = 400;
+      throw error;
+    }
+    const start = { year: from.getFullYear(), month: from.getMonth() + 1, day: from.getDate() };
+    const finish = shiftDate(end.getFullYear(), end.getMonth() + 1, end.getDate(), 1);
+    const fromDate = businessInstant(start.year, start.month, start.day);
+    const toDate = businessInstant(finish.year, finish.month, finish.day);
+    const span = Math.round((toDate - fromDate) / 86400000);
+    if (span > 3660) {
+      const error = new Error('El rango máximo es de 10 años.');
+      error.status = 400;
+      throw error;
+    }
+    return { from: fromDate, to: toDate };
+  }
+  const error = new Error('Elige un periodo válido.');
+  error.status = 400;
+  throw error;
 }
 
 function ymd(date) {
@@ -915,6 +1124,7 @@ const API_RULES = [
   { test: /^\/api\/pos\/sales$/, modules: ['venta'] },
   { test: /^\/api\/notices\/barra$/, modules: ['barra'] },
   { test: /^\/api\/invoices\/\d+\/deliver$/, modules: ['barra'] },
+  { test: /^\/api\/invoices\/\d+\/items\/\d+\/split$/, modules: ['barra'] },
   { test: /^\/api\/invoices\/\d+\/refund$/, modules: ['barra'] },
   { test: /^\/api\/invoices\/\d+\/receipt$/, modules: ['venta', 'barra', 'movimientos'] },
   { test: /^\/api\/invoices\/code\//, modules: ['barra'] },
@@ -1051,6 +1261,7 @@ function uploadSingle(dir, accept, rejectedMessage) {
 }
 
 const uploadReceipt = uploadSingle(() => activeTenant().receiptDir, (file) => ['.jpg', '.png', '.webp', '.gif', '.pdf'].includes(fileExtension(file)), 'El comprobante debe ser una imagen o un PDF.');
+const uploadProductImage = uploadSingle(() => productImageDir, (file) => ['.jpg', '.png', '.webp', '.gif'].includes(fileExtension(file)), 'La imagen debe ser JPG, PNG, WEBP o GIF.');
 const uploadMedia = uploadSingle(() => activeTenant().mediaDir, (file) => ['.jpg', '.png', '.webp', '.gif', '.mp4', '.webm', '.mov'].includes(fileExtension(file)), 'Usa una imagen o un video MP4, WEBM o MOV.');
 
 function cleanUsername(value) {
@@ -1392,9 +1603,17 @@ app.post('/api/products', requireAuth, (req, res) => {
   const unitsPerBox = readUnitsPerBox(req.body.unitsPerBox, 1);
   const packed = unitsFromPack(req.body.stock, unitsPerBox, req.body.pack, { min: 0 });
   const costPer = req.body.pack === 'box' ? 'box' : 'unit';
-  let costCents = toCents(req.body.cost);
-  let priceCents = toCents(req.body.price);
-  const boxPriceCents = req.body.boxPrice == null || req.body.boxPrice === '' ? null : toCents(req.body.boxPrice);
+  const costCurrency = currencyOf(req.body.costCurrency);
+  const priceCurrency = currencyOf(req.body.priceCurrency);
+  const costParsed = pricedInUsd(req.body.cost, costCurrency);
+  if (costParsed.error) return res.status(400).json({ error: costParsed.error });
+  let costCents = costParsed.cents;
+  const priceParsed = pricedInUsd(req.body.price, priceCurrency);
+  if (priceParsed.error) return res.status(400).json({ error: priceParsed.error });
+  let priceCents = priceParsed.cents;
+  const boxParsed = req.body.boxPrice == null || req.body.boxPrice === '' ? { cents: null } : pricedInUsd(req.body.boxPrice, priceCurrency);
+  if (boxParsed.error) return res.status(400).json({ error: boxParsed.error });
+  const boxPriceCents = boxParsed.cents;
   if (name.length < 2 || name.length > 80) {
     return res.status(400).json({ error: 'El nombre debe tener entre 2 y 80 caracteres.' });
   }
@@ -1411,9 +1630,10 @@ app.post('/api/products', requireAuth, (req, res) => {
     priceCents = priceSplit.cents;
   }
   if ((priceCents == null || req.body.price === '') && req.body.profit != null && req.body.profit !== '') {
-    const profitCents = toCents(req.body.profit);
-    if (profitCents == null) return res.status(400).json({ error: 'Escribe la utilidad, con hasta dos decimales.' });
-    priceCents = costCents + profitCents;
+    const profitParsed = pricedInUsd(req.body.profit, priceCurrency);
+    if (profitParsed.error) return res.status(400).json({ error: profitParsed.error });
+    if (profitParsed.cents == null) return res.status(400).json({ error: 'Escribe la utilidad, con hasta dos decimales.' });
+    priceCents = costCents + profitParsed.cents;
   }
   if (priceCents == null || priceCents > 10000000) {
     return res.status(400).json({ error: 'Escribe el precio de venta por unidad, con hasta dos decimales.' });
@@ -1422,10 +1642,10 @@ app.post('/api/products', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'El costo por unidad queda demasiado alto.' });
   }
   if (packed.error) return res.status(400).json({ error: packed.error });
-  if (code && db.prepare('SELECT id FROM products WHERE code = ?').get(code)) {
+  if (code && db.prepare('SELECT id FROM products WHERE code = ? AND is_combo = 0').get(code)) {
     return res.status(409).json({ error: 'Ya hay un producto con ese código.' });
   }
-  const info = db.prepare('INSERT INTO products (name, code, department, cost_cents, price_cents, stock, units_per_box, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)').run(
+  const info = db.prepare('INSERT INTO products (name, code, department, cost_cents, price_cents, stock, units_per_box, active, quick_sale, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)').run(
     name,
     code || null,
     department || null,
@@ -1433,6 +1653,7 @@ app.post('/api/products', requireAuth, (req, res) => {
     priceCents,
     packed.units,
     unitsPerBox,
+    req.body.quickSale ? 1 : 0,
     new Date().toISOString(),
   );
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(num(info.lastInsertRowid));
@@ -1486,12 +1707,25 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
   const name = req.body.name == null ? current.name : String(req.body.name).trim();
   const code = req.body.code == null ? (current.code || '') : String(req.body.code).trim().slice(0, 40);
   const department = req.body.department == null ? (current.department || '') : String(req.body.department).trim().slice(0, 60);
-  const costCents = req.body.cost == null ? num(current.cost_cents) : toCents(req.body.cost);
-  let priceCents = req.body.price == null || req.body.price === '' ? null : toCents(req.body.price);
+  const costCurrency = currencyOf(req.body.costCurrency);
+  const priceCurrency = currencyOf(req.body.priceCurrency);
+  let costCents = num(current.cost_cents);
+  if (req.body.cost != null) {
+    const costParsed = pricedInUsd(req.body.cost, costCurrency);
+    if (costParsed.error) return res.status(400).json({ error: costParsed.error });
+    costCents = costParsed.cents;
+  }
+  let priceCents = null;
+  if (req.body.price != null && req.body.price !== '') {
+    const priceParsed = pricedInUsd(req.body.price, priceCurrency);
+    if (priceParsed.error) return res.status(400).json({ error: priceParsed.error });
+    priceCents = priceParsed.cents;
+  }
   if (priceCents == null && req.body.profit != null && req.body.profit !== '') {
-    const profitCents = toCents(req.body.profit);
-    if (profitCents == null || costCents == null) return res.status(400).json({ error: 'Escribe la utilidad, con hasta dos decimales.' });
-    priceCents = costCents + profitCents;
+    const profitParsed = pricedInUsd(req.body.profit, priceCurrency);
+    if (profitParsed.error) return res.status(400).json({ error: profitParsed.error });
+    if (profitParsed.cents == null || costCents == null) return res.status(400).json({ error: 'Escribe la utilidad, con hasta dos decimales.' });
+    priceCents = costCents + profitParsed.cents;
   }
   if (priceCents == null) priceCents = num(current.price_cents);
   const stock = req.body.stock == null ? num(current.stock) : wholeNumber(req.body.stock, 0, 1000000);
@@ -1509,10 +1743,11 @@ app.patch('/api/products/:id', requireAuth, (req, res) => {
   if (unitsPerBox == null) return res.status(400).json({ error: 'Las unidades por caja tienen que ser un número entero entre 1 y 10000.' });
   if (stock == null) return res.status(400).json({ error: 'Las existencias tienen que ser un número entero entre 0 y 1000000.' });
   const delta = stock - num(current.stock);
-  if (code && db.prepare('SELECT id FROM products WHERE code = ? AND id <> ?').get(code, id)) {
+  if (code && !current.is_combo && db.prepare('SELECT id FROM products WHERE code = ? AND is_combo = 0 AND id <> ?').get(code, id)) {
     return res.status(409).json({ error: 'Ya hay un producto con ese código.' });
   }
-  db.prepare('UPDATE products SET name = ?, code = ?, department = ?, cost_cents = ?, price_cents = ?, stock = ?, units_per_box = ?, active = ? WHERE id = ?').run(name, code || null, department || null, costCents, priceCents, stock, unitsPerBox, active ? 1 : 0, id);
+  const quickSale = req.body.quickSale == null ? Boolean(current.quick_sale) : Boolean(req.body.quickSale);
+  db.prepare('UPDATE products SET name = ?, code = ?, department = ?, cost_cents = ?, price_cents = ?, stock = ?, units_per_box = ?, active = ?, quick_sale = ? WHERE id = ?').run(name, code || null, department || null, costCents, priceCents, stock, unitsPerBox, active ? 1 : 0, quickSale ? 1 : 0, id);
   if (delta !== 0) {
     logMovement({
       kind: delta > 0 ? 'entrada' : 'ajuste',
@@ -1547,8 +1782,29 @@ app.delete('/api/products/:id', requireAuth, (req, res) => {
   const id = Number(req.params.id);
   const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   if (!current) return res.status(404).json({ error: 'No se encontró el producto.' });
+  if (current.image_file) fs.unlink(path.join(productImageDir, path.basename(current.image_file)), () => {});
   removeProduct(id);
   res.json({ ok: true });
+});
+
+app.post('/api/products/:id/image', requireAuth, uploadProductImage, (req, res) => {
+  const id = Number(req.params.id);
+  const current = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 0').get(id);
+  if (!current) return res.status(404).json({ error: 'No se encontró el producto.' });
+  if (!req.file) return res.status(400).json({ error: 'Elige una imagen.' });
+  if (req.file.size > 8 * 1024 * 1024) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: 'La imagen debe pesar 8 MB o menos.' });
+  }
+  if (current.image_file) fs.unlink(path.join(productImageDir, path.basename(current.image_file)), () => {});
+  db.prepare('UPDATE products SET image_file = ? WHERE id = ?').run(req.file.filename, id);
+  res.json({ product: presentProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
+});
+
+app.get('/api/products/:id/image', requireAuth, (req, res) => {
+  const product = db.prepare('SELECT image_file FROM products WHERE id = ?').get(Number(req.params.id));
+  if (!product?.image_file) return res.status(404).json({ error: 'Este producto no tiene imagen.' });
+  res.sendFile(path.join(productImageDir, path.basename(product.image_file)));
 });
 
 app.post('/api/combos', requireAuth, (req, res) => {
@@ -1566,10 +1822,11 @@ app.post('/api/combos', requireAuth, (req, res) => {
   const payUsd = req.body.payUsd == null ? true : Boolean(req.body.payUsd);
   const payBs = req.body.payBs == null ? false : Boolean(req.body.payBs);
   if (!payUsd && !payBs) return res.status(400).json({ error: 'Elige al menos una moneda para el combo: dólares o bolívares.' });
+  const code = String(req.body.code || '').trim().slice(0, 40);
   const info = db.prepare(`
-    INSERT INTO products (name, cost_cents, price_cents, stock, units_per_box, active, is_combo, pay_usd, pay_bs, created_at)
-    VALUES (?, 0, ?, 0, 1, ?, 1, ?, ?, ?)
-  `).run(name, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, new Date().toISOString());
+    INSERT INTO products (name, code, cost_cents, price_cents, stock, units_per_box, active, is_combo, pay_usd, pay_bs, created_at)
+    VALUES (?, ?, 0, ?, 0, 1, ?, 1, ?, ?, ?)
+  `).run(name, code || null, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, new Date().toISOString());
   const id = num(info.lastInsertRowid);
   saveComboParts(id, recipe.parts);
   res.status(201).json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
@@ -1597,7 +1854,8 @@ app.patch('/api/combos/:id', requireAuth, (req, res) => {
   const payUsd = req.body.payUsd == null ? Boolean(current.pay_usd) : Boolean(req.body.payUsd);
   const payBs = req.body.payBs == null ? Boolean(current.pay_bs) : Boolean(req.body.payBs);
   if (!payUsd && !payBs) return res.status(400).json({ error: 'Elige al menos una moneda para el combo: dólares o bolívares.' });
-  db.prepare('UPDATE products SET name = ?, price_cents = ?, active = ?, pay_usd = ?, pay_bs = ? WHERE id = ?').run(name, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, id);
+  const code = req.body.code == null ? (current.code || '') : String(req.body.code).trim().slice(0, 40);
+  db.prepare('UPDATE products SET name = ?, code = ?, price_cents = ?, active = ?, pay_usd = ?, pay_bs = ? WHERE id = ?').run(name, code || null, priceCents, active ? 1 : 0, payUsd ? 1 : 0, payBs ? 1 : 0, id);
   if (parts) saveComboParts(id, parts);
   res.json({ product: presentCatalog(db.prepare('SELECT * FROM products WHERE id = ?').get(id)) });
 });
@@ -1926,7 +2184,7 @@ app.post('/api/purchases/:id/deliver', requireAuth, (req, res) => {
           throw httpError(400, `No puedes entregar más ${item.product_name} de lo facturado. Quedan ${quantity - current.length}.`);
         }
       }
-      const next = [...current, ...picked].sort((left, right) => left - right);
+      const next = withDeliveryTime(item, picked, new Date().toISOString());
       const info = saveMarks.run(next.length, JSON.stringify(next), itemId, id);
       if (!num(info.changes)) throw httpError(400, `No se pudo registrar la entrega de ${item.product_name}.`);
     }
@@ -2099,8 +2357,8 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertItem = db.prepare(`
-    INSERT INTO invoice_items (invoice_id, product_id, product_name, unit_price_cents, cost_cents, quantity, delivered, delivered_marks)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO invoice_items (invoice_id, product_id, product_name, unit_price_cents, cost_cents, quantity, delivered, delivered_marks, combo_parts)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const takeStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND active = 1 AND is_combo = 0 AND stock >= ?');
   let invoiceId = 0;
@@ -2134,11 +2392,19 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
       const costCents = line.product.is_combo
         ? num(db.prepare(`SELECT COALESCE(SUM(ci.quantity * p.cost_cents), 0) AS n FROM combo_items ci JOIN products p ON p.id = ci.product_id WHERE ci.combo_id = ?`).get(line.product.id).n)
         : num(line.product.cost_cents);
+      const soldAt = new Date().toISOString();
       const delivered = channel === 'detal' ? line.quantity : 0;
       const marks = channel === 'detal'
-        ? JSON.stringify(Array.from({ length: line.quantity }, (_, index) => index + 1))
+        ? JSON.stringify(Array.from({ length: line.quantity }, (_, index) => ({ n: index + 1, at: soldAt })))
         : null;
-      insertItem.run(invoiceId, line.product.id, line.product.name, num(line.product.price_cents), costCents, line.quantity, delivered, marks);
+      const snapshot = line.product.is_combo
+        ? JSON.stringify(comboParts(line.product.id).map((part) => ({
+          productId: part.productId,
+          name: part.name,
+          quantity: part.quantity,
+        })))
+        : null;
+      insertItem.run(invoiceId, line.product.id, line.product.name, num(line.product.price_cents), costCents, line.quantity, delivered, marks, snapshot);
       logMovement({
         kind: 'venta',
         productId: num(line.product.id),
@@ -2247,8 +2513,10 @@ app.get('/api/public/invoices/:code', (req, res) => {
         quantity: item.quantity,
         delivered: item.delivered,
         deliveredUnits: item.deliveredUnits,
+        deliveredAt: item.deliveredAt,
         remaining: item.remaining,
         totalCents: item.totalCents,
+        exploded: item.exploded,
       })),
     },
   });
@@ -2286,10 +2554,57 @@ app.post('/api/invoices/:id/deliver', requireAuth, (req, res) => {
         }
         picked.push(number);
       }
-      const next = [...current, ...picked].sort((left, right) => left - right);
+      const next = withDeliveryTime(item, picked, new Date().toISOString());
       const info = saveMarks.run(next.length, JSON.stringify(next), itemId, id);
       if (!num(info.changes)) throw httpError(400, `No se pudo registrar la entrega de ${item.product_name}.`);
     }
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* la transacción ya se cerró */ }
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
+  res.json({ sale: loadInvoice(id) });
+});
+
+app.post('/api/invoices/:id/items/:itemId/split', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const itemId = Number(req.params.itemId);
+  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(id);
+  if (!invoice) return res.status(404).json({ error: 'No se encontró la factura.' });
+  if (invoice.refunded_at) return res.status(409).json({ error: 'Esta factura ya fue devuelta.' });
+  if (invoice.channel === 'detal') return res.status(400).json({ error: 'La venta al detal ya quedó entregada.' });
+  const item = db.prepare('SELECT * FROM invoice_items WHERE id = ? AND invoice_id = ?').get(itemId, id);
+  if (!item) return res.status(404).json({ error: 'No se encontró ese producto en la factura.' });
+  if (item.exploded_at) return res.status(409).json({ error: 'Ese combo ya está desglosado.' });
+  if (item.source_item_id) return res.status(400).json({ error: 'Esa línea ya es una unidad del combo.' });
+  if (num(item.delivered) > 0) return res.status(400).json({ error: 'Desglosa el combo antes de entregar la primera unidad.' });
+  const parts = itemParts(item);
+  if (!parts.length) return res.status(400).json({ error: 'Ese producto no es un combo con unidades para abrir.' });
+  const buckets = num(item.quantity);
+  const opened = parts.map((part) => ({ ...part, units: part.quantity * buckets }));
+  const totalUnits = opened.reduce((sum, part) => sum + part.units, 0);
+  if (!totalUnits || totalUnits > 500) {
+    return res.status(400).json({ error: 'Ese combo se abre en demasiadas unidades para entregarlo en barra.' });
+  }
+  const insertChild = db.prepare(`
+    INSERT INTO invoice_items (
+      invoice_id, product_id, product_name, unit_price_cents, cost_cents, quantity, delivered, delivered_marks, source_item_id
+    ) VALUES (?, ?, ?, 0, 0, ?, 0, NULL, ?)
+  `);
+  db.exec('BEGIN');
+  try {
+    for (const part of opened) {
+      const product = db.prepare('SELECT id FROM products WHERE id = ?').get(part.productId);
+      if (!product) throw httpError(400, `Ya no está ${part.name}, el producto del combo.`);
+      insertChild.run(id, part.productId, part.name, part.units, itemId);
+    }
+    const marked = db.prepare('UPDATE invoice_items SET exploded_at = ? WHERE id = ? AND invoice_id = ? AND exploded_at IS NULL').run(
+      new Date().toISOString(),
+      itemId,
+      id,
+    );
+    if (!num(marked.changes)) throw httpError(409, 'Ese combo ya está desglosado.');
     db.exec('COMMIT');
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch { /* la transacción ya se cerró */ }
@@ -2342,6 +2657,7 @@ app.post('/api/invoices/:id/refund', requireAuth, (req, res) => {
     }
     if (!restoredFromMovements) {
       for (const item of items) {
+        if (item.source_item_id) continue;
         const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
         if (!product) continue;
         if (product.is_combo) {
@@ -2437,6 +2753,20 @@ app.get('/api/supplier-purchases', requireAuth, (req, res) => {
   res.json({
     purchases: rows.map((row) => {
       const items = db.prepare('SELECT * FROM supplier_purchase_items WHERE purchase_id = ? ORDER BY id').all(row.id);
+      const presented = items.map((item) => {
+        const packs = num(item.pack_count);
+        const packCost = item.pack_cost_cents == null ? null : num(item.pack_cost_cents);
+        const quantity = num(item.quantity);
+        return {
+          productName: item.product_name,
+          quantity,
+          packCount: packs,
+          costCents: num(item.cost_cents),
+          packCostCents: packCost,
+          priceCents: num(item.price_cents),
+          totalCents: packs > 0 && packCost != null ? packs * packCost : num(item.cost_cents) * quantity,
+        };
+      });
       return {
         id: num(row.id),
         supplierName: row.supplier_name,
@@ -2444,13 +2774,8 @@ app.get('/api/supplier-purchases', requireAuth, (req, res) => {
         loadedAt: row.loaded_at,
         dueDate: row.due_date || '',
         paymentMethod: row.payment_method,
-        totalCents: items.reduce((sum, item) => sum + num(item.cost_cents) * num(item.quantity), 0),
-        items: items.map((item) => ({
-          productName: item.product_name,
-          quantity: num(item.quantity),
-          costCents: num(item.cost_cents),
-          priceCents: num(item.price_cents),
-        })),
+        totalCents: presented.reduce((sum, item) => sum + item.totalCents, 0),
+        items: presented,
       };
     }),
   });
@@ -2469,17 +2794,34 @@ app.post('/api/supplier-purchases', requireAuth, (req, res) => {
   const lines = [];
   for (const raw of req.body.items) {
     const product = db.prepare('SELECT * FROM products WHERE id = ? AND is_combo = 0').get(Number(raw?.productId));
-    const quantity = wholeNumber(raw?.quantity, 1, 100000);
-    const costCents = toCents(raw?.cost);
+    if (!product) return res.status(400).json({ error: 'Revisa el producto, la cantidad, el costo y el precio de venta.' });
+    const perBox = Math.max(1, num(product.units_per_box) || 1);
+    const pack = perBox >= 2 ? 'box' : 'unit';
+    const packed = unitsFromPack(raw?.quantity, perBox, pack, { min: 1 });
+    if (packed.error) return res.status(400).json({ error: packed.error });
+    if (num(product.stock) + packed.units > 1000000) {
+      return res.status(400).json({ error: 'Esa compra pasa de 1000000 unidades.' });
+    }
+    const enteredCost = toCents(raw?.cost);
+    const costSplit = centsPerUnit(enteredCost, perBox, pack);
+    if (costSplit.error) return res.status(400).json({ error: costSplit.error });
     let priceCents = raw?.price == null || raw?.price === '' ? null : toCents(raw.price);
     if (priceCents == null && raw?.profit != null && raw.profit !== '') {
       const profitCents = toCents(raw.profit);
-      if (profitCents != null && costCents != null) priceCents = costCents + profitCents;
+      if (profitCents != null && costSplit.cents != null) priceCents = costSplit.cents + profitCents;
     }
-    if (!product || quantity == null || costCents == null || priceCents == null) {
+    if (costSplit.cents == null || priceCents == null) {
       return res.status(400).json({ error: 'Revisa el producto, la cantidad, el costo y el precio de venta.' });
     }
-    lines.push({ product, quantity, costCents, priceCents });
+    lines.push({
+      product,
+      quantity: packed.units,
+      costCents: costSplit.cents,
+      priceCents,
+      packCount: pack === 'box' ? wholeNumber(raw?.quantity, 1, 100000) : null,
+      packCostCents: pack === 'box' ? enteredCost : null,
+      note: packed.note,
+    });
   }
   const loadedAt = new Date().toISOString();
   const insert = db.prepare(`
@@ -2487,8 +2829,9 @@ app.post('/api/supplier-purchases', requireAuth, (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?)
   `);
   const insertItem = db.prepare(`
-    INSERT INTO supplier_purchase_items (purchase_id, product_id, product_name, quantity, cost_cents, price_cents)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO supplier_purchase_items (
+      purchase_id, product_id, product_name, quantity, cost_cents, price_cents, pack_count, pack_cost_cents
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   db.exec('BEGIN');
   let purchaseId = 0;
@@ -2496,7 +2839,7 @@ app.post('/api/supplier-purchases', requireAuth, (req, res) => {
     const info = insert.run(supplier.id, invoiceDate, loadedAt, dueDate || null, paymentMethod, loadedAt);
     purchaseId = num(info.lastInsertRowid);
     for (const line of lines) {
-      insertItem.run(purchaseId, line.product.id, line.product.name, line.quantity, line.costCents, line.priceCents);
+      insertItem.run(purchaseId, line.product.id, line.product.name, line.quantity, line.costCents, line.priceCents, line.packCount, line.packCostCents);
       db.prepare('UPDATE products SET stock = stock + ?, cost_cents = ?, price_cents = ? WHERE id = ?').run(line.quantity, line.costCents, line.priceCents, line.product.id);
       logMovement({
         kind: 'carga',
@@ -2505,7 +2848,7 @@ app.post('/api/supplier-purchases', requireAuth, (req, res) => {
         quantity: line.quantity,
         unitPriceCents: line.costCents,
         userId: req.account?.id,
-        note: `Compra ${supplier.name}`,
+        note: line.note ? `Compra ${supplier.name}: ${line.note}` : `Compra ${supplier.name}`,
       });
     }
     db.exec('COMMIT');
@@ -2580,8 +2923,12 @@ app.post('/api/expenses', requireAuth, (req, res) => {
 app.get('/api/summary', requireAuth, (req, res) => {
   const preset = String(req.query.preset || 'day');
   let range;
+  let fromHour;
+  let toHour;
   try {
-    range = rangeFor(preset === 'hour' ? 'day' : preset, req.query.from, req.query.to);
+    range = businessRange(preset, req.query.from, req.query.to);
+    fromHour = parseHour(req.query.fromHour);
+    toHour = parseHour(req.query.toHour);
   } catch (error) {
     return res.status(error.status || 400).json({ error: error.message });
   }
@@ -2590,9 +2937,11 @@ app.get('/api/summary', requireAuth, (req, res) => {
            ii.quantity, ii.unit_price_cents, ii.cost_cents
     FROM invoices i
     JOIN invoice_items ii ON ii.invoice_id = i.id
-    WHERE i.refunded_at IS NULL AND i.created_at >= ? AND i.created_at < ?
-  `).all(range.from.toISOString(), range.to.toISOString());
+    WHERE i.refunded_at IS NULL AND ii.source_item_id IS NULL AND i.created_at >= ? AND i.created_at < ?
+  `).all(range.from.toISOString(), range.to.toISOString())
+    .filter((line) => matchesHour(line.created_at, fromHour, toHour));
   const invoiceIds = new Set();
+  const invoiceTimes = new Map();
   const payments = new Map();
   let salesCents = 0;
   let costCents = 0;
@@ -2604,6 +2953,7 @@ app.get('/api/summary', requireAuth, (req, res) => {
     salesCents += revenue;
     costCents += cost;
     invoiceIds.add(num(line.id));
+    invoiceTimes.set(num(line.id), line.created_at);
     const bucket = payments.get(line.payment_method) || { method: line.payment_method, countIds: new Set(), salesCents: 0, salesBs: 0 };
     bucket.countIds.add(num(line.id));
     bucket.salesCents += revenue;
@@ -2612,7 +2962,8 @@ app.get('/api/summary', requireAuth, (req, res) => {
   }
   const salesBs = lines.reduce((sum, line) => sum + Math.round(num(line.quantity) * num(line.unit_price_cents) * (Number(line.bcv_rate) || 0)), 0);
   const costBs = lines.reduce((sum, line) => sum + Math.round(num(line.quantity) * num(line.cost_cents) * (Number(line.bcv_rate) || 0)), 0);
-  const expenseRows = db.prepare('SELECT * FROM expenses WHERE spent_at >= ? AND spent_at < ?').all(range.from.toISOString(), range.to.toISOString());
+  const expenseRows = db.prepare('SELECT * FROM expenses WHERE spent_at >= ? AND spent_at < ?').all(range.from.toISOString(), range.to.toISOString())
+    .filter((expense) => matchesHour(expense.spent_at, fromHour, toHour));
   let expensesCents = 0;
   let expensesBs = 0;
   for (const expense of expenseRows) {
@@ -2629,29 +2980,63 @@ app.get('/api/summary', requireAuth, (req, res) => {
   const grain = preset === 'hour' || preset === 'day' ? 'hour' : 'day';
   const buckets = new Map();
   if (grain === 'hour') {
-    for (let hour = 0; hour < 24; hour += 1) buckets.set(String(hour), { label: String(hour).padStart(2, '0'), salesCents: 0, salesBs: 0 });
+    for (const hour of hoursInWindow(fromHour, toHour)) {
+      buckets.set(String(hour), { label: `${String(hour).padStart(2, '0')}:00`, salesCents: 0, salesBs: 0 });
+    }
+  } else {
+    const cursor = new Date(range.from);
+    while (cursor < range.to) {
+      const parts = businessParts(cursor);
+      buckets.set(`${parts.year}-${parts.month}-${parts.day}`, { label: String(parts.day), salesCents: 0, salesBs: 0 });
+      cursor.setTime(cursor.getTime() + 86400000);
+    }
   }
   for (const line of lines) {
-    const date = new Date(line.created_at);
-    const key = grain === 'hour' ? String(date.getHours()) : ymd(date);
-    if (!buckets.has(key) && grain === 'day') buckets.set(key, { label: String(date.getDate()), salesCents: 0, salesBs: 0 });
+    const parts = businessParts(new Date(line.created_at));
+    const key = grain === 'hour' ? String(parts.hour) : `${parts.year}-${parts.month}-${parts.day}`;
     const bucket = buckets.get(key);
     if (!bucket) continue;
     const revenue = num(line.quantity) * num(line.unit_price_cents);
     bucket.salesCents += revenue;
     bucket.salesBs += Math.round(revenue * (Number(line.bcv_rate) || 0));
   }
+  const rateNow = currentRate();
+  let globalSalesBs = 0;
+  let globalCostBs = 0;
+  for (const line of lines) {
+    const rate = Number(line.bcv_rate) || rateNow;
+    const revenue = num(line.quantity) * num(line.unit_price_cents);
+    const cost = num(line.quantity) * num(line.cost_cents);
+    globalSalesBs += Math.round(revenue * rate);
+    globalCostBs += Math.round(cost * rate);
+  }
+  const globalSalesCents = salesCents;
+  const globalCostCents = costCents;
+  const globalExpensesCents = expensesCents;
+  const globalExpensesBs = expensesBs || (rateNow > 0 ? Math.round(expensesCents * rateNow) : 0);
+  const globalProfitCents = globalSalesCents - globalCostCents - globalExpensesCents;
+  const globalProfitBs = globalSalesBs - globalCostBs - globalExpensesBs;
   const pending = num(db.prepare(`
     SELECT COALESCE(SUM(ii.quantity - ii.delivered), 0) AS n
     FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
-    WHERE i.refunded_at IS NULL
+    WHERE i.refunded_at IS NULL AND ii.exploded_at IS NULL
   `).get().n);
-  const recent = db.prepare('SELECT id FROM invoices ORDER BY created_at DESC, id DESC LIMIT 6').all().map((row) => loadInvoice(num(row.id)));
+  const recent = [...invoiceTimes.entries()]
+    .sort((left, right) => String(right[1]).localeCompare(String(left[1])) || right[0] - left[0])
+    .slice(0, 6)
+    .map(([invoiceId]) => loadInvoice(invoiceId));
+  const windowLabel = hourWindowLabel(fromHour, toHour);
+  const formatter = new Intl.DateTimeFormat('es-ES', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Caracas' });
+  const startLabel = formatter.format(range.from);
+  const endLabel = formatter.format(new Date(range.to.getTime() - 1));
+  const label = `${startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`}${windowLabel ? ` · ${windowLabel}` : ''}`;
   res.json({
     preset: preset === 'hour' ? 'hour' : preset,
-    from: ymd(range.from),
-    to: ymd(new Date(range.to.getTime() - 1)),
-    label: formatRange(range.from, range.to),
+    from: businessYmd(range.from),
+    to: businessYmd(new Date(range.to.getTime() - 1)),
+    fromHour,
+    toHour,
+    label,
     rate: currentRate(),
     invoices: invoiceIds.size,
     salesCents,
@@ -2662,6 +3047,14 @@ app.get('/api/summary', requireAuth, (req, res) => {
     profitBs: salesBs - costBs,
     expensesCents,
     expensesBs,
+    globalSalesCents,
+    globalSalesBs,
+    globalCostCents,
+    globalCostBs,
+    globalExpensesCents,
+    globalExpensesBs,
+    globalProfitCents,
+    globalProfitBs,
     pending,
     payments: [...payments.values()].map((row) => ({ method: row.method, count: row.countIds.size, salesCents: row.salesCents, salesBs: row.salesBs })),
     series: [...buckets.values()],
@@ -2711,7 +3104,7 @@ app.get('/api/sales', requireAuth, (req, res) => {
              i.code AS ticket_code, i.customer_name AS alias, '' AS event_name
       FROM invoice_items ii
       JOIN invoices i ON i.id = ii.invoice_id
-      WHERE i.created_at >= ? AND i.created_at < ? AND i.refunded_at IS NULL`;
+      WHERE i.created_at >= ? AND i.created_at < ? AND i.refunded_at IS NULL AND ii.source_item_id IS NULL`;
     if (like) {
       invoiceSql += ' AND ii.product_name LIKE ? COLLATE NOCASE';
       invoiceParams.push(like);

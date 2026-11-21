@@ -179,6 +179,9 @@ a { color: inherit; text-decoration: none; }
 .hint.loss { color: var(--wine); }
 .stat { padding: 16px 18px; }
 .stat-label { color: var(--ink-soft); font-size: 14px; }
+.stat-sub { margin: 2px 0 0; color: var(--ink-soft); font-size: 15px; }
+.global-card { margin-bottom: 22px; }
+.global-card .grid-stats { margin: 14px 0 0; }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 22px; }
 
 .card { padding: 18px; }
@@ -351,11 +354,14 @@ th { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: 
 .balance { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .purchase { margin-top: 14px; padding-top: 8px; }
 .cart-add { display: grid; grid-template-columns: 1fr 150px auto; gap: 10px; align-items: end; }
+.summary-filters { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom: 10px; }
 .cart-add .field { margin: 0; }
 .stock-add { width: 84px; padding: 8px 10px; }
 .pack-select { width: auto; min-width: 132px; padding: 8px 10px; }
 .screen-name { width: 160px; padding: 8px 10px; }
 .product-form { max-width: 460px; }
+.money-line { display: grid; grid-template-columns: 1fr 148px; gap: 10px; align-items: end; }
+.money-line .field { margin-bottom: 0; }
 .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 8px; }
 .checks .check { margin: 0; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #c8b8a4; margin-right: 6px; }
@@ -645,6 +651,7 @@ body:has(.shell.night) { background: #070712; color: #eef7ff; }
 .shell.night .lead,
 .shell.night .hint,
 .shell.night .stat-label,
+.shell.night .stat-sub,
 .shell.night .field span,
 .shell.night .check span,
 .shell.night .price-line,
@@ -784,6 +791,53 @@ html[data-negocio="licoreria-ad"] .shell.night .side-btn:hover { color: #e7c27a;
 }
 .buy-hit:disabled { opacity: 0.45; }
 .buy-hit span { color: #9eb0c8; }
+.buy-hit { align-items: center; }
+.choice-thumb, .product-thumb, .product-preview, .quick-photo, .thumb-empty {
+  display: grid;
+  place-items: center;
+  object-fit: cover;
+  border-radius: 10px;
+  background: #1a120e;
+  color: #fff;
+  font-weight: 700;
+}
+.choice-thumb, .product-thumb { width: 54px; height: 54px; flex: none; }
+.product-preview, .quick-photo { width: 100%; aspect-ratio: 1; }
+.product-preview { width: 140px; height: 140px; margin-bottom: 10px; }
+.choice-list { display: grid; gap: 8px; margin: 12px 0; }
+.choice-hit {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(57, 243, 255, 0.35);
+  background: #0c1020;
+  color: #eef7ff;
+  border-radius: 12px;
+  padding: 8px;
+}
+.choice-hit small { display: block; color: #9eb0c8; }
+.choice-hit:disabled { opacity: 0.45; }
+.quick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  gap: 10px;
+  margin: 8px 0 14px;
+}
+.quick-tile {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(57, 243, 255, 0.35);
+  background: #0c1020;
+  color: #eef7ff;
+  border-radius: 14px;
+  padding: 8px;
+  text-align: left;
+}
+.quick-tile span { color: #9eb0c8; font-size: 12px; }
+.quick-tile:disabled { opacity: 0.45; }
 .sale-hit {
   display: flex;
   flex-direction: column;
@@ -820,6 +874,25 @@ html[data-negocio="licoreria-ad"] .shell.night .side-btn:hover { color: #e7c27a;
   max-height: min(52vh, 460px);
   overflow: auto;
 }
+.purchase-line { margin-top: 10px; }
+.purchase-line-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.purchase-line-head span {
+  font-family: var(--serif);
+  font-size: 22px;
+  white-space: nowrap;
+}
+.purchase-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.purchase-fields .field { margin: 0; }
 .pos-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(260px, 0.85fr);
@@ -841,6 +914,14 @@ html[data-negocio="licoreria-ad"] .shell.night .side-btn:hover { color: #e7c27a;
 .unit.free { background: #1f8f57; border-color: #167246; color: #fff; }
 .unit.pick { background: #ff2ad4; border-color: #ff2ad4; color: #fff; }
 .unit.done { background: #c8c2b8; border-color: #8d877e; color: #4a453e; }
+.unit.has-time {
+  aspect-ratio: auto;
+  min-height: 56px;
+  border-radius: 16px;
+  padding: 6px 2px;
+  line-height: 1.05;
+}
+.unit-time { display: block; font-size: 10px; font-weight: 560; }
 .unit:disabled { cursor: default; }
 .sheet-legend {
   display: flex;
@@ -862,6 +943,7 @@ html[data-negocio="licoreria-ad"] .shell.night .side-btn:hover { color: #e7c27a;
 .legend-dot.done { background: #c8c2b8; }
 @media (max-width: 800px) {
   .pos-grid { grid-template-columns: 1fr; }
+  .purchase-fields { grid-template-columns: 1fr 1fr; }
 }
 #sheet-actions { margin-top: 14px; }
 .share-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

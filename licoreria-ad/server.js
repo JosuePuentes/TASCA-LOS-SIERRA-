@@ -357,6 +357,8 @@ if (!columnNames('invoice_items').includes('cost_cents')) db.exec('ALTER TABLE i
 if (!columnNames('invoices').includes('currency')) db.exec(`ALTER TABLE invoices ADD COLUMN currency TEXT NOT NULL DEFAULT 'usd'`);
 if (!columnNames('invoices').includes('bcv_rate')) db.exec('ALTER TABLE invoices ADD COLUMN bcv_rate REAL NOT NULL DEFAULT 0');
 if (!columnNames('invoices').includes('channel')) db.exec(`ALTER TABLE invoices ADD COLUMN channel TEXT NOT NULL DEFAULT 'barra'`);
+if (!columnNames('invoices').includes('customer_document')) db.exec('ALTER TABLE invoices ADD COLUMN customer_document TEXT');
+if (!columnNames('invoices').includes('payment_reference')) db.exec('ALTER TABLE invoices ADD COLUMN payment_reference TEXT');
 if (!columnNames('invoice_items').includes('delivered_marks')) db.exec('ALTER TABLE invoice_items ADD COLUMN delivered_marks TEXT');
 if (!columnNames('invoice_items').includes('combo_parts')) db.exec('ALTER TABLE invoice_items ADD COLUMN combo_parts TEXT');
 if (!columnNames('invoice_items').includes('exploded_at')) db.exec('ALTER TABLE invoice_items ADD COLUMN exploded_at TEXT');
@@ -2229,6 +2231,8 @@ function loadInvoice(id) {
     numberLabel: invoiceNumberLabel(number),
     code: invoice.code,
     customerName: invoice.customer_name,
+    customerDocument: invoice.customer_document || '',
+    paymentReference: invoice.payment_reference || '',
     paymentMethod: invoice.payment_method || '',
     createdAt: invoice.created_at,
     refundedAt: invoice.refunded_at || null,
@@ -2249,10 +2253,12 @@ function findInvoices(query) {
   let where = `WHERE ${barraOnly}`;
   if (text) {
     where += ` AND (customer_name LIKE ? COLLATE NOCASE
+      OR COALESCE(customer_document, '') LIKE ? COLLATE NOCASE
+      OR COALESCE(payment_reference, '') LIKE ? COLLATE NOCASE
       OR code LIKE ? COLLATE NOCASE
       OR CAST(number AS TEXT) LIKE ?`;
     const like = `%${text.replace(/[%_]/g, '')}%`;
-    params.push(like, like, like.replace(/^0+/, '') || like);
+    params.push(like, like, like, like, like.replace(/^0+/, '') || like);
     if (/^\d+$/.test(text)) {
       where += ' OR number = ?';
       params.push(Number(text));
@@ -2321,11 +2327,33 @@ function readSaleItems(rawItems) {
   return { lines, consumption };
 }
 
+function cleanCustomerDocument(value) {
+  const text = String(value || '').trim().toUpperCase().replace(/\s+/g, '').slice(0, 20);
+  if (!/^[A-Z]{0,2}-?\d{5,12}$/.test(text)) return '';
+  return text;
+}
+
+function cleanPaymentReference(value) {
+  const text = String(value || '').trim().replace(/\s+/g, '').slice(0, 40);
+  if (!/^[A-Za-z0-9-]{4,40}$/.test(text)) return '';
+  return text;
+}
+
 app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, res) => {
   const customerName = String(req.body.customerName || '').trim().slice(0, 80);
+  const customerDocument = cleanCustomerDocument(req.body.customerDocument);
+  const paymentReference = cleanPaymentReference(req.body.paymentReference);
   if (customerName.length < 2) {
     if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: 'Escribe el nombre del cliente.' });
+  }
+  if (!customerDocument) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: 'Escribe la cédula del cliente.' });
+  }
+  if (!paymentReference) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: 'Escribe el número de referencia.' });
   }
   const paymentMethod = String(req.body.paymentMethod || '');
   if (!PAYMENTS.has(paymentMethod)) {
@@ -2353,8 +2381,8 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
     throw error;
   }
   const insertInvoice = db.prepare(`
-    INSERT INTO invoices (number, code, customer_name, payment_method, currency, bcv_rate, receipt_file, created_at, channel)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO invoices (number, code, customer_name, customer_document, payment_reference, payment_method, currency, bcv_rate, receipt_file, created_at, channel)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertItem = db.prepare(`
     INSERT INTO invoice_items (invoice_id, product_id, product_name, unit_price_cents, cost_cents, quantity, delivered, delivered_marks, combo_parts)
@@ -2379,7 +2407,7 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
       if (currency === 'usd' && !allowUsd) throw httpError(400, `${line.product.name} no se cobra en dólares.`);
       if (currency === 'bs' && !allowBs) throw httpError(400, `${line.product.name} no se cobra en bolívares.`);
     }
-    const info = insertInvoice.run(number, code, customerName, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString(), channel);
+    const info = insertInvoice.run(number, code, customerName, customerDocument, paymentReference, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString(), channel);
     invoiceId = num(info.lastInsertRowid);
     for (const [productId, quantity] of consumption) {
       const taken = takeStock.run(quantity, productId, quantity);
@@ -2467,6 +2495,8 @@ app.get('/api/notices/barra', requireAuth, (req, res) => {
       id: sale.id,
       numberLabel: sale.numberLabel,
       customerName: sale.customerName,
+      customerDocument: sale.customerDocument,
+      paymentReference: sale.paymentReference,
       createdAt: sale.createdAt,
       totalCents: sale.totalCents,
       currency: sale.currency,
@@ -2501,6 +2531,8 @@ app.get('/api/public/invoices/:code', (req, res) => {
       numberLabel: sale.numberLabel,
       code: sale.code,
       customerName: sale.customerName,
+      customerDocument: sale.customerDocument,
+      paymentReference: sale.paymentReference,
       createdAt: sale.createdAt,
       refundedAt: sale.refundedAt,
       totalCents: sale.totalCents,

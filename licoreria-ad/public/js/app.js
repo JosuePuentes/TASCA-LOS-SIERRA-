@@ -1619,7 +1619,8 @@ function posView() {
     </section>
     <div class="pos-grid">
       <section class="card">
-        <label class="field"><span>Cliente</span><input id="pos-name" maxlength="80" placeholder="Nombre de quien compra" autocomplete="off"></label>
+        <label class="field"><span>Nombre del cliente</span><input id="pos-name" maxlength="80" placeholder="Nombre de quien compra" autocomplete="off" required></label>
+        <label class="field"><span>Cédula</span><input id="pos-document" maxlength="20" placeholder="V-12345678" autocomplete="off" required></label>
         <label class="field"><span>Método de pago</span><select id="pos-pay">${paymentOptions('efectivo')}</select></label>
         <p class="hint">Búsqueda rápida</p>
         <div id="quick-sale">${quickSaleHtml()}</div>
@@ -1635,7 +1636,7 @@ function posView() {
         <div id="pos-lines">${cartLinesHtml()}</div>
         <div class="total-box"><span>Total</span><strong id="pos-total">${displayMoney(total)}</strong></div>
         <button class="btn primary" type="button" data-action="charge-sale" ${state.cart.length ? '' : 'disabled'}>Cobrar y emitir QR</button>
-        <p class="hint">Al cobrar eliges si pasa a barra o es venta al detal.</p>
+        <p class="hint">Al cobrar escribes el número de referencia y después eliges si pasa a barra o es venta al detal.</p>
       </section>
     </div>`;
 }
@@ -1651,6 +1652,7 @@ function issuedSaleView(sale) {
       <div class="stub-body">
         <p class="stub-kicker">${esc(negocio.name)}</p>
         <h3>${esc(sale.customerName)}</h3>
+        <p class="price-line">Cédula ${esc(sale.customerDocument || '')}${sale.paymentReference ? ` · Ref. ${esc(sale.paymentReference)}` : ''}</p>
         <p class="code">Factura ${esc(sale.numberLabel)}</p>
         ${lines}
         <p class="price-line">${chargedTotal(sale)} · ${esc(paymentLabel(sale.paymentMethod))}${sale.currency === 'bs' && sale.bcvRate ? ` · tasa ${sale.bcvRate}` : ''}</p>
@@ -1670,18 +1672,32 @@ function refreshPosCart() {
   if (button) button.disabled = state.cart.length === 0;
 }
 
-function channelModal(name) {
+function customerDocumentValue(value) {
+  return String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+}
+
+function validCustomerDocument(value) {
+  return /^[A-Z]{0,2}-?\d{5,12}$/.test(customerDocumentValue(value));
+}
+
+function validPaymentReference(value) {
+  return /^[A-Za-z0-9-]{4,40}$/.test(String(value || '').trim().replace(/\s+/g, ''));
+}
+
+function channelModal(name, documentId) {
   return `
     <div class="modal-back" data-modal="channel" data-action="close-channel">
       <article class="modal card" data-stop>
         <p class="stub-kicker">Confirmar factura</p>
-        <h2>¿A dónde pasa esta venta?</h2>
-        <p class="lead page-lead">La cuenta de ${esc(name)} ya está lista. Elige antes de emitir el QR.</p>
+        <h2>Número de referencia</h2>
+        <p class="lead page-lead">La cuenta de ${esc(name)}, cédula ${esc(documentId)}, ya está lista.</p>
+        <label class="field"><span>Nro. de referencia</span><input id="sale-reference" inputmode="numeric" maxlength="40" autocomplete="off" placeholder="Referencia del pago"></label>
+        <h2 style="margin-top:8px">¿A dónde pasa esta venta?</h2>
         <div class="channel-actions">
           <button class="btn primary" type="button" data-action="confirm-channel" data-channel="barra">Pasar a barra</button>
           <button class="btn amber" type="button" data-action="confirm-channel" data-channel="detal">Venta al detal</button>
         </div>
-        <p class="hint">Barra avisa a quien tenga ese módulo. Venta al detal se entrega en el momento y no entra a barra.</p>
+        <p class="hint">Primero el número de referencia. Barra avisa a quien tenga ese módulo. Venta al detal se entrega en el momento y no entra a barra.</p>
         <div class="row-actions" style="margin-top:12px">
           <button class="btn ghost" type="button" data-action="close-channel">Cancelar</button>
         </div>
@@ -1757,6 +1773,7 @@ function renderOrderAlerts() {
         <p class="stub-kicker">Factura ${esc(notice.numberLabel)}</p>
         <h2>Pedido nuevo</h2>
         <p class="order-who">${esc(notice.customerName)}</p>
+        <p class="hint">${esc(notice.customerDocument || '')}${notice.paymentReference ? ` · Ref. ${esc(notice.paymentReference)}` : ''}</p>
         <p class="order-items">${esc(items)}</p>
         <p class="price-line">${chargedTotal(notice)}</p>
         <div class="row-actions">
@@ -1906,6 +1923,7 @@ function barraModal() {
       <article class="modal card wide sheet-modal" data-stop>
         <p class="stub-kicker">Factura ${esc(sale.numberLabel)}</p>
         <h2 style="font-size:36px">${esc(sale.customerName)}</h2>
+        <p class="hint">${sale.customerDocument ? `Cédula ${esc(sale.customerDocument)}` : ''}${sale.paymentReference ? ` · Ref. ${esc(sale.paymentReference)}` : ''}</p>
         <p class="price-line">${sale.refundedAt ? 'Devuelta' : money(sale.totalCents)} · ${esc(paymentLabel(sale.paymentMethod))}</p>
         <div id="barra-lines">${barraLinesHtml(sale, true)}</div>
         <div class="sheet-legend">
@@ -1972,6 +1990,7 @@ function facturaBody(sale) {
   return `
     <p class="eyebrow">Factura ${esc(sale.numberLabel)}</p>
     <h1 style="font-size:42px">${esc(sale.customerName)}</h1>
+    <p class="price-line">${sale.customerDocument ? `Cédula ${esc(sale.customerDocument)}` : ''}${sale.paymentReference ? ` · Ref. ${esc(sale.paymentReference)}` : ''}</p>
     <p class="lead">${sale.refundedAt ? 'Esta factura fue devuelta.' : `Entregado ${delivered} · Disponible ${pending}`}</p>
     ${barraLinesHtml(sale, false)}
     <div class="sheet-legend">
@@ -3671,15 +3690,22 @@ async function onClick(event) {
   }
   if (action === 'charge-sale') {
     const customerName = document.getElementById('pos-name')?.value.trim() || '';
+    const customerDocument = customerDocumentValue(document.getElementById('pos-document')?.value);
     if (customerName.length < 2) {
       toast('Escribe el nombre del cliente.', 'bad');
+      return;
+    }
+    if (!validCustomerDocument(customerDocument)) {
+      toast('Escribe la cédula del cliente.', 'bad');
+      document.getElementById('pos-document')?.focus();
       return;
     }
     if (!state.cart.length) {
       toast('Agrega un producto a la venta.', 'bad');
       return;
     }
-    mountModal(channelModal(customerName));
+    mountModal(channelModal(customerName, customerDocument));
+    document.getElementById('sale-reference')?.focus();
     return;
   }
   if (action === 'close-channel') {
@@ -3688,14 +3714,23 @@ async function onClick(event) {
   }
   if (action === 'confirm-channel') {
     const customerName = document.getElementById('pos-name')?.value.trim() || '';
-    if (customerName.length < 2 || !state.cart.length) {
+    const customerDocument = customerDocumentValue(document.getElementById('pos-document')?.value);
+    const paymentReference = String(document.getElementById('sale-reference')?.value || '').trim().replace(/\s+/g, '');
+    if (customerName.length < 2 || !validCustomerDocument(customerDocument) || !state.cart.length) {
       document.querySelector('[data-modal="channel"]')?.remove();
       toast('Revisa el cliente y los productos antes de cobrar.', 'bad');
+      return;
+    }
+    if (!validPaymentReference(paymentReference)) {
+      toast('Escribe el número de referencia.', 'bad');
+      document.getElementById('sale-reference')?.focus();
       return;
     }
     control.disabled = true;
     const body = new FormData();
     body.set('customerName', customerName);
+    body.set('customerDocument', customerDocument);
+    body.set('paymentReference', paymentReference);
     body.set('paymentMethod', document.getElementById('pos-pay')?.value || 'efectivo');
     body.set('currency', state.saleCurrency === 'bs' ? 'bs' : 'usd');
     body.set('channel', control.dataset.channel === 'detal' ? 'detal' : 'barra');

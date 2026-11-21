@@ -2395,7 +2395,8 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
         throw httpError(400, `No hay suficientes existencias de ${product?.name || 'un producto'}.`);
       }
     }
-    const number = num(db.prepare('SELECT COALESCE(MAX(number), 0) AS n FROM invoices').get().n) + 1;
+    const lastNumber = num(db.prepare('SELECT COALESCE(MAX(number), 0) AS n FROM invoices').get().n);
+    const number = Math.max(lastNumber + 1, 1060);
     let code = newCode();
     while (db.prepare('SELECT id FROM invoices WHERE code = ?').get(code)) code = newCode();
     for (const line of lines) {
@@ -2530,37 +2531,57 @@ app.get('/api/invoices/:id', requireAuth, asyncRoute(async (req, res) => {
   res.json({ sale: await withInvoiceQr(req, sale) });
 }));
 
+function publicSaleView(sale) {
+  return {
+    numberLabel: sale.numberLabel,
+    customerName: sale.customerName,
+    paymentReference: sale.paymentReference,
+    createdAt: sale.createdAt,
+    refundedAt: sale.refundedAt,
+    totalCents: sale.totalCents,
+    currency: sale.currency,
+    bcvRate: sale.bcvRate,
+    totalBsCents: sale.totalBsCents,
+    items: sale.items.map((item) => ({
+      id: item.id,
+      productName: item.productName,
+      quantity: item.quantity,
+      delivered: item.delivered,
+      deliveredUnits: item.deliveredUnits,
+      deliveredAt: item.deliveredAt,
+      remaining: item.remaining,
+      totalCents: item.totalCents,
+      exploded: item.exploded,
+      parts: item.parts || [],
+    })),
+  };
+}
+
+app.get('/api/public/customer-qr', asyncRoute(async (req, res) => {
+  const url = `${requestOrigin(req)}/pedido`;
+  const qrDataUrl = await QRCode.toDataURL(url, {
+    margin: 1,
+    width: 420,
+    errorCorrectionLevel: 'M',
+    color: { dark: '#241812', light: '#fffaf3' },
+  });
+  res.json({ url, qrDataUrl });
+}));
+
+app.get('/api/public/orders/:number', (req, res) => {
+  const text = String(req.params.number || '').trim();
+  if (!/^\d+$/.test(text)) return res.status(404).json({ error: 'No hay un pedido con ese código.' });
+  const row = db.prepare('SELECT id FROM invoices WHERE number = ?').get(Number(text));
+  if (!row) return res.status(404).json({ error: 'No hay un pedido con ese código.' });
+  res.json({ sale: publicSaleView(loadInvoice(num(row.id))) });
+});
+
 app.get('/api/public/invoices/:code', (req, res) => {
   const code = normalizeCode(req.params.code);
   const row = db.prepare('SELECT id FROM invoices WHERE code = ?').get(code);
   if (!row) return res.status(404).json({ error: 'No hay una factura con ese código.' });
   const sale = loadInvoice(num(row.id));
-  res.json({
-    sale: {
-      numberLabel: sale.numberLabel,
-      code: sale.code,
-      customerName: sale.customerName,
-      customerDocument: sale.customerDocument,
-      paymentReference: sale.paymentReference,
-      createdAt: sale.createdAt,
-      refundedAt: sale.refundedAt,
-      totalCents: sale.totalCents,
-      currency: sale.currency,
-      bcvRate: sale.bcvRate,
-      totalBsCents: sale.totalBsCents,
-      items: sale.items.map((item) => ({
-        id: item.id,
-        productName: item.productName,
-        quantity: item.quantity,
-        delivered: item.delivered,
-        deliveredUnits: item.deliveredUnits,
-        deliveredAt: item.deliveredAt,
-        remaining: item.remaining,
-        totalCents: item.totalCents,
-        exploded: item.exploded,
-      })),
-    },
-  });
+  res.json({ sale: { ...publicSaleView(sale), code: sale.code, customerDocument: sale.customerDocument } });
 });
 
 app.post('/api/invoices/:id/deliver', requireAuth, (req, res) => {

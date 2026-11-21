@@ -319,6 +319,7 @@ th { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: 
 .stub-kicker { font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--amber-deep); }
 .stub-body h3 { margin: 8px 0; font-size: 28px; }
 .barcode { width: min(100%, 280px); height: auto; display: block; margin: 8px 0 4px; background: #fff; }
+.customer-qr img { width: 180px; height: 180px; background: #fff; }
 .stub-qr { display: grid; place-items: center; border-left: 1px dashed var(--line); padding: 12px; background: #fff; }
 .stub-qr img { width: 128px; height: 128px; }
 .people { font-family: var(--serif); font-size: 64px; line-height: 0.9; letter-spacing: -0.04em; }
@@ -953,6 +954,12 @@ html[data-negocio="licoreria-ad"] .shell.night .side-btn:hover { color: #e7c27a;
 .share-row select { width: auto; min-width: 180px; }
 
 @media print {
+  body.printing-qr .sidebar,
+  body.printing-qr .topbar,
+  body.printing-qr .sale-work,
+  body.printing-qr .no-print { display: none !important; }
+  body.printing-qr .customer-qr { background: white; color: #070712; box-shadow: none; }
+  body.printing-qr .customer-qr img { width: 280px; height: 280px; }
   body.printing .sidebar,
   body.printing .topbar,
   body.printing .no-print { display: none !important; }

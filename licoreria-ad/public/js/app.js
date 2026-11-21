@@ -26,6 +26,7 @@ const state = {
   barraSale: null,
   barraPicks: {},
   issuedSale: null,
+  customerQr: null,
   saleCurrency: 'usd',
   bcvRate: 0,
   summaryQuery: { preset: 'day', from: '', to: '', fromHour: '', toHour: '' },
@@ -134,6 +135,7 @@ function pageTitle(path) {
     '/panel/usuarios': 'Usuarios',
     '/panel/cuenta': 'Cuenta',
     '/pantalla': 'Pantalla',
+    '/pedido': 'Ver pedido',
   }[path];
   return section ? `${section} · ${negocio.name}` : negocio.name;
 }
@@ -435,17 +437,24 @@ function loading() {
   return `<p class="lead">Cargando…</p>`;
 }
 
+function publicHeader() {
+  return `
+    <header class="topnav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="/" data-link>${mark()}<span>${esc(negocio.name)}</span></a>
+        <nav class="nav-links">
+          <a href="/" data-link>Inicio</a>
+          <a href="/pedido" data-link>Ver pedido</a>
+          <a class="btn amber small" href="${state.user ? '/panel' : '/acceso'}" data-link>${state.user ? 'Panel' : 'Acceso'}</a>
+        </nav>
+      </div>
+    </header>`;
+}
+
 function homeView() {
   return `
     <div class="public">
-      <header class="topnav">
-        <div class="wrap nav-inner">
-          <a class="brand" href="/" data-link>${mark()}<span>${esc(negocio.name)}</span></a>
-          <nav class="nav-links">
-            <a class="btn amber small" href="${state.user ? '/panel' : '/acceso'}" data-link>${state.user ? 'Panel' : 'Acceso'}</a>
-          </nav>
-        </div>
-      </header>
+      ${publicHeader()}
       <section class="hero">
         <div class="wrap">
           <p class="eyebrow">${esc(negocio.eyebrow)}</p>
@@ -1681,9 +1690,10 @@ function posView() {
   const total = state.cart.reduce((sum, line) => sum + line.priceCents * line.quantity, 0);
   const rateText = Number(state.bcvRate) > 0 ? Number(state.bcvRate).toLocaleString('es-VE', { maximumFractionDigits: 4 }) : '';
   return `
-    <h2>Venta</h2>
-    <p class="lead page-lead">Arma la cuenta y cobra. Cada factura nueva lleva el siguiente código de barras de la secuencia.</p>
-    <section class="card" style="margin-bottom:16px">
+    <h2 class="sale-work">Venta</h2>
+    <p class="lead page-lead sale-work">Arma la cuenta y cobra. Cada factura nueva lleva el siguiente código de barras de la secuencia.</p>
+    ${customerQrHtml()}
+    <section class="card sale-work" style="margin-bottom:16px">
       <div class="cart-add">
         <label class="field"><span>Tasa BCV</span><input id="bcv-rate" inputmode="decimal" value="${esc(rateText)}" placeholder="Ejemplo: 45,50"></label>
         <label class="field"><span>Cobrar en</span>
@@ -1696,7 +1706,7 @@ function posView() {
       <button class="btn ghost" type="button" data-action="save-rate">Guardar tasa</button>
       <p class="hint">El precio en bolívares es el precio en dólares multiplicado por esta tasa. Un combo solo aparece en las monedas que tenga marcadas.</p>
     </section>
-    <div class="pos-grid">
+    <div class="pos-grid sale-work">
       <section class="card">
         <label class="field"><span>Nombre del cliente</span><input id="pos-name" maxlength="80" placeholder="Nombre de quien compra" autocomplete="off" required></label>
         <label class="field"><span>Método de pago</span><select id="pos-pay">${paymentOptions('efectivo')}</select></label>
@@ -2094,14 +2104,43 @@ function keepPicks(sale) {
   state.barraPicks = next;
 }
 
+function customerQrHtml() {
+  if (!state.customerQr?.qrDataUrl) return '';
+  return `
+    <section class="card customer-qr" id="customer-qr" style="margin-bottom:16px">
+      <h3>QR de los clientes</h3>
+      <p class="hint">Este código no cambia. Quien lo escanee escribe el código de barras de su factura y ve solo ese pedido, al momento.</p>
+      <img alt="QR para ver el pedido" src="${state.customerQr.qrDataUrl}">
+      <button class="btn ghost no-print" type="button" data-action="print-customer-qr">Imprimir QR</button>
+    </section>`;
+}
+
+function pedidoForm(number = '') {
+  return `
+    <form class="card" data-form="pedido" style="max-width:460px">
+      <h2>Tu pedido</h2>
+      <p class="lead page-lead">Escribe el código de barras de tu factura. Aquí solo aparece ese pedido.</p>
+      <label class="field"><span>Código de barras</span><input name="number" inputmode="numeric" autocomplete="off" placeholder="1060" value="${esc(number)}" required></label>
+      <p class="form-error" hidden></p>
+      <button class="btn primary" type="submit">Ver pedido</button>
+    </form>`;
+}
+
+function pedidoView(number = '') {
+  return `
+    <div class="public">
+      ${publicHeader()}
+      <section class="section"><div class="wrap">
+        ${pedidoForm(number)}
+        <div id="pedido-live" style="margin-top:16px"></div>
+      </div></section>
+    </div>`;
+}
+
 function facturaView(sale) {
   return `
     <div class="public">
-      <header class="topnav">
-        <div class="wrap nav-inner">
-          <a class="brand" href="/" data-link>${mark()}<span>${esc(negocio.name)}</span></a>
-        </div>
-      </header>
+      ${publicHeader()}
       <section class="section"><div class="wrap" id="factura-live">${sale ? facturaBody(sale) : '<p class="lead">Cargando factura…</p>'}</div></section>
     </div>`;
 }
@@ -3052,6 +3091,16 @@ function watchInvoice(id) {
   }, 2000);
 }
 
+async function refreshPedido(number) {
+  const box = document.getElementById('pedido-live');
+  try {
+    const data = await api(`/api/public/orders/${encodeURIComponent(number)}`, { soft: true });
+    if (box) box.innerHTML = facturaBody(data.sale);
+  } catch (error) {
+    if (box) box.innerHTML = `<div class="empty"><h2>No está ese pedido</h2><p class="lead">${esc(error.message)}</p></div>`;
+  }
+}
+
 async function refreshFactura(code) {
   const box = document.getElementById('factura-live');
   try {
@@ -3080,6 +3129,22 @@ async function render() {
       if (token !== renderToken) return;
       refreshFactura(code);
     }, 2000);
+    return;
+  }
+  const pedidoMatch = currentPath().match(/^\/pedido(?:\/(\d+))?$/);
+  if (pedidoMatch) {
+    document.title = `Ver pedido · ${negocio.name}`;
+    const number = pedidoMatch[1] || '';
+    mount(pedidoView(number));
+    document.querySelector('form[data-form="pedido"] input[name="number"]')?.focus();
+    if (number) {
+      await refreshPedido(number);
+      if (token !== renderToken) return;
+      liveTimer = setInterval(() => {
+        if (token !== renderToken) return;
+        refreshPedido(number);
+      }, 2000);
+    }
     return;
   }
   document.body.classList.remove('nav-open');
@@ -3163,9 +3228,14 @@ async function render() {
     if (path === '/panel/venta') {
       state.issuedSale = null;
       mount(shell(loading()));
-      const [catalog, rate] = await Promise.all([api('/api/products'), api('/api/rate')]);
+      const [catalog, rate, customerQr] = await Promise.all([
+        api('/api/products'),
+        api('/api/rate'),
+        api('/api/public/customer-qr', { soft: true }).catch(() => null),
+      ]);
       state.products = catalog.products;
       state.bcvRate = rate.rate;
+      state.customerQr = customerQr;
       if (token !== renderToken) return;
       mount(shell(posView()));
       document.getElementById('pos-search')?.focus();
@@ -3328,6 +3398,15 @@ async function onSubmit(event) {
   if (button) button.disabled = true;
   setFormError(form, '');
   try {
+    if (kind === 'pedido') {
+      const number = String(values.number || '').trim();
+      if (!/^\d+$/.test(number)) {
+        setFormError(form, 'Escribe el código de barras de tu factura.');
+        return;
+      }
+      await navigate(`/pedido/${Number(number)}`);
+      return;
+    }
     if (kind === 'login') {
       state.user = (await api('/api/login', { method: 'POST', body: values })).user;
       watchBarraNotices();
@@ -3640,6 +3719,12 @@ async function onClick(event) {
     state.issued = null;
     mount(shell(createView()));
     updateTotal();
+    return;
+  }
+  if (action === 'print-customer-qr') {
+    document.body.classList.add('printing-qr');
+    window.print();
+    window.addEventListener('afterprint', () => document.body.classList.remove('printing-qr'), { once: true });
     return;
   }
   if (action === 'print') {

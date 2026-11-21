@@ -2248,11 +2248,17 @@ function loadInvoice(id) {
   };
 }
 
-function findInvoices(query) {
+function findInvoices(query, mode = 'open') {
   const text = String(query || '').trim().slice(0, 80);
   const params = [];
   const barraOnly = `(channel IS NULL OR channel = '' OR channel = 'barra')`;
+  const pendingUnits = `EXISTS (
+    SELECT 1 FROM invoice_items ii
+    WHERE ii.invoice_id = invoices.id AND ii.exploded_at IS NULL AND ii.quantity > ii.delivered
+  )`;
   let where = `WHERE ${barraOnly}`;
+  if (mode === 'history') where += ` AND (refunded_at IS NOT NULL OR NOT ${pendingUnits})`;
+  else where += ` AND refunded_at IS NULL AND ${pendingUnits}`;
   if (text) {
     where += ` AND (customer_name LIKE ? COLLATE NOCASE
       OR COALESCE(customer_document, '') LIKE ? COLLATE NOCASE
@@ -2329,12 +2335,6 @@ function readSaleItems(rawItems) {
   return { lines, consumption };
 }
 
-function cleanCustomerDocument(value) {
-  const text = String(value || '').trim().toUpperCase().replace(/\s+/g, '').slice(0, 20);
-  if (!/^[A-Z]{0,2}-?\d{5,12}$/.test(text)) return '';
-  return text;
-}
-
 function cleanPaymentReference(value) {
   const text = String(value || '').trim().replace(/\s+/g, '').slice(0, 40);
   if (!/^[A-Za-z0-9-]{4,40}$/.test(text)) return '';
@@ -2343,15 +2343,10 @@ function cleanPaymentReference(value) {
 
 app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, res) => {
   const customerName = String(req.body.customerName || '').trim().slice(0, 80);
-  const customerDocument = cleanCustomerDocument(req.body.customerDocument);
   const paymentReference = cleanPaymentReference(req.body.paymentReference);
   if (customerName.length < 2) {
     if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: 'Escribe el nombre del cliente.' });
-  }
-  if (!customerDocument) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(400).json({ error: 'Escribe la cédula del cliente.' });
   }
   if (!paymentReference) {
     if (req.file) fs.unlink(req.file.path, () => {});
@@ -2409,7 +2404,7 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
       if (currency === 'usd' && !allowUsd) throw httpError(400, `${line.product.name} no se cobra en dólares.`);
       if (currency === 'bs' && !allowBs) throw httpError(400, `${line.product.name} no se cobra en bolívares.`);
     }
-    const info = insertInvoice.run(number, code, customerName, customerDocument, paymentReference, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString(), channel);
+    const info = insertInvoice.run(number, code, customerName, '', paymentReference, paymentMethod, currency, bcvRate, req.file?.filename || null, new Date().toISOString(), channel);
     invoiceId = num(info.lastInsertRowid);
     for (const [productId, quantity] of consumption) {
       const taken = takeStock.run(quantity, productId, quantity);
@@ -2476,7 +2471,8 @@ app.post('/api/pos/sales', requireAuth, uploadReceipt, asyncRoute(async (req, re
 }));
 
 app.get('/api/invoices', requireAuth, (req, res) => {
-  res.json({ sales: findInvoices(req.query.q) });
+  const query = req.query.q;
+  res.json({ sales: findInvoices(query, 'open'), history: findInvoices(query, 'history') });
 });
 
 app.get('/api/notices/barra', requireAuth, (req, res) => {
@@ -2510,11 +2506,22 @@ app.get('/api/notices/barra', requireAuth, (req, res) => {
   res.json({ notices });
 });
 
+function invoiceIdFromScan(raw) {
+  const code = normalizeCode(raw);
+  const byCode = db.prepare('SELECT id FROM invoices WHERE code = ?').get(code);
+  if (byCode) return num(byCode.id);
+  const text = String(raw || '').trim();
+  if (/^\d+$/.test(text)) {
+    const byNumber = db.prepare('SELECT id FROM invoices WHERE number = ?').get(Number(text));
+    if (byNumber) return num(byNumber.id);
+  }
+  return 0;
+}
+
 app.get('/api/invoices/code/:code', requireAuth, asyncRoute(async (req, res) => {
-  const code = normalizeCode(req.params.code);
-  const row = db.prepare('SELECT id FROM invoices WHERE code = ?').get(code);
-  if (!row) return res.status(404).json({ error: 'No hay una factura con ese código.' });
-  res.json({ sale: await withInvoiceQr(req, loadInvoice(num(row.id))) });
+  const id = invoiceIdFromScan(req.params.code);
+  if (!id) return res.status(404).json({ error: 'No hay una factura con ese código.' });
+  res.json({ sale: await withInvoiceQr(req, loadInvoice(id)) });
 }));
 
 app.get('/api/invoices/:id', requireAuth, asyncRoute(async (req, res) => {

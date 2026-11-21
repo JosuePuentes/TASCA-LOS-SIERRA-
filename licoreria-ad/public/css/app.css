@@ -318,6 +318,7 @@ th { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: 
 .stub-body { padding: 16px; }
 .stub-kicker { font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--amber-deep); }
 .stub-body h3 { margin: 8px 0; font-size: 28px; }
+.barcode { width: min(100%, 280px); height: auto; display: block; margin: 8px 0 4px; background: #fff; }
 .stub-qr { display: grid; place-items: center; border-left: 1px dashed var(--line); padding: 12px; background: #fff; }
 .stub-qr img { width: 128px; height: 128px; }
 .people { font-family: var(--serif); font-size: 64px; line-height: 0.9; letter-spacing: -0.04em; }

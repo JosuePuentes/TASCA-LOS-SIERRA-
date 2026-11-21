@@ -1,4 +1,4 @@
-const CACHE = 'licoreria-ad-v16';
+const CACHE = 'licoreria-ad-v19';
 const SHELL = ['/', '/css/app.css', '/js/app.js', '/favicon.svg', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {

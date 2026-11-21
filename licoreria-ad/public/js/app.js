@@ -21,6 +21,7 @@ const state = {
   board: [],
   boardQuery: '',
   barra: [],
+  barraHistory: [],
   barraQuery: '',
   barraSale: null,
   barraPicks: {},
@@ -253,6 +254,25 @@ function hourOptions(selected) {
 
 function deliveryItems(sale) {
   return (sale?.items || []).filter((item) => !item.exploded);
+}
+
+function saleIsOpen(sale) {
+  if (!sale || sale.refundedAt) return false;
+  const items = deliveryItems(sale);
+  return items.some((item) => item.remaining > 0);
+}
+
+function placeBarraSale(sale) {
+  if (!sale) return;
+  state.barra = state.barra.filter((item) => item.id !== sale.id);
+  state.barraHistory = state.barraHistory.filter((item) => item.id !== sale.id);
+  if (saleIsOpen(sale)) state.barra.unshift(sale);
+  else state.barraHistory.unshift(sale);
+}
+
+function rememberBarraLists(data) {
+  state.barra = data?.sales || [];
+  state.barraHistory = data?.history || [];
 }
 
 function remaining(iso) {
@@ -1662,7 +1682,7 @@ function posView() {
   const rateText = Number(state.bcvRate) > 0 ? Number(state.bcvRate).toLocaleString('es-VE', { maximumFractionDigits: 4 }) : '';
   return `
     <h2>Venta</h2>
-    <p class="lead page-lead">Arma la cuenta, cobra y entrega el QR. Quien lo escanee ve la factura al momento.</p>
+    <p class="lead page-lead">Arma la cuenta y cobra. Cada factura nueva lleva el siguiente código de barras de la secuencia.</p>
     <section class="card" style="margin-bottom:16px">
       <div class="cart-add">
         <label class="field"><span>Tasa BCV</span><input id="bcv-rate" inputmode="decimal" value="${esc(rateText)}" placeholder="Ejemplo: 45,50"></label>
@@ -1679,7 +1699,6 @@ function posView() {
     <div class="pos-grid">
       <section class="card">
         <label class="field"><span>Nombre del cliente</span><input id="pos-name" maxlength="80" placeholder="Nombre de quien compra" autocomplete="off" required></label>
-        <label class="field"><span>Cédula</span><input id="pos-document" maxlength="20" placeholder="V-12345678" autocomplete="off" required></label>
         <label class="field"><span>Método de pago</span><select id="pos-pay">${paymentOptions('efectivo')}</select></label>
         <p class="hint">Búsqueda rápida</p>
         <div id="quick-sale">${quickSaleHtml()}</div>
@@ -1694,7 +1713,7 @@ function posView() {
         <h3>Cuenta</h3>
         <div id="pos-lines">${cartLinesHtml()}</div>
         <div class="total-box"><span>Total</span><strong id="pos-total">${displayMoney(total)}</strong></div>
-        <button class="btn primary" type="button" data-action="charge-sale" ${state.cart.length ? '' : 'disabled'}>Cobrar y emitir QR</button>
+        <button class="btn primary" type="button" data-action="charge-sale" ${state.cart.length ? '' : 'disabled'}>Cobrar y emitir código</button>
         <p class="hint">Al cobrar escribes el número de referencia y después eliges si pasa a barra o es venta al detal.</p>
       </section>
     </div>`;
@@ -1711,8 +1730,9 @@ function issuedSaleView(sale) {
       <div class="stub-body">
         <p class="stub-kicker">${esc(negocio.name)}</p>
         <h3>${esc(sale.customerName)}</h3>
-        <p class="price-line">Cédula ${esc(sale.customerDocument || '')}${sale.paymentReference ? ` · Ref. ${esc(sale.paymentReference)}` : ''}</p>
+        <p class="price-line">${sale.paymentReference ? `Ref. ${esc(sale.paymentReference)}` : ''}</p>
         <p class="code">Factura ${esc(sale.numberLabel)}</p>
+        ${barcodeSvg(sale.numberLabel)}
         ${lines}
         <p class="price-line">${chargedTotal(sale)} · ${esc(paymentLabel(sale.paymentMethod))}${sale.currency === 'bs' && sale.bcvRate ? ` · tasa ${sale.bcvRate}` : ''}</p>
         <p class="hint">${sale.channel === 'detal' ? 'Venta al detal. Se entregó en el momento.' : 'Pasó a barra.'}</p>
@@ -1731,25 +1751,56 @@ function refreshPosCart() {
   if (button) button.disabled = state.cart.length === 0;
 }
 
-function customerDocumentValue(value) {
-  return String(value || '').trim().toUpperCase().replace(/\s+/g, '');
-}
+const CODE128 = [
+  '212222','222122','222221','121223','121322','131222','122213','122312','132212','221213',
+  '221312','231212','112232','122132','122231','113222','123122','123221','223211','221132',
+  '221231','213212','223112','312131','311222','321122','321221','312212','322112','322211',
+  '212123','212321','232121','111323','131123','131321','112313','132113','132311','211313',
+  '231113','231311','112133','112331','132131','113123','113321','133121','313121','211331',
+  '231131','213113','213311','213131','311123','311321','331121','312113','312311','332111',
+  '314111','221411','431111','111224','111422','121124','121421','141122','141221','112214',
+  '112412','122114','122411','142112','142211','241211','221114','413111','241112','134111',
+  '111242','121142','121241','114212','124112','124211','411212','421112','421211','212141',
+  '214121','412121','111143','111341','131141','114113','114311','411113','411311','113141',
+  '114131','311141','411131','211412','211214','211232','2331112',
+];
 
-function validCustomerDocument(value) {
-  return /^[A-Z]{0,2}-?\d{5,12}$/.test(customerDocumentValue(value));
+function barcodeSvg(value) {
+  const text = String(value || '');
+  if (!text) return '';
+  const codes = [104];
+  for (const char of text) {
+    const symbol = char.charCodeAt(0) - 32;
+    if (symbol < 0 || symbol > 94) return '';
+    codes.push(symbol);
+  }
+  let checksum = codes[0];
+  for (let index = 1; index < codes.length; index += 1) checksum += codes[index] * index;
+  codes.push(checksum % 103, 106);
+  let x = 10;
+  const bars = [];
+  let ink = true;
+  for (const width of codes.map((code) => CODE128[code]).join('')) {
+    const size = Number(width);
+    if (ink) bars.push(`<rect x="${x}" y="0" width="${size}" height="46"/>`);
+    x += size;
+    ink = !ink;
+  }
+  const total = x + 10;
+  return `<svg class="barcode" viewBox="0 0 ${total} 62" role="img" aria-label="Código ${esc(text)}"><rect width="100%" height="100%" fill="#fff"/><g fill="#241812">${bars.join('')}</g><text x="${total / 2}" y="58" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#241812">${esc(text)}</text></svg>`;
 }
 
 function validPaymentReference(value) {
   return /^[A-Za-z0-9-]{4,40}$/.test(String(value || '').trim().replace(/\s+/g, ''));
 }
 
-function channelModal(name, documentId) {
+function channelModal(name) {
   return `
     <div class="modal-back" data-modal="channel" data-action="close-channel">
       <article class="modal card" data-stop>
         <p class="stub-kicker">Confirmar factura</p>
         <h2>Número de referencia</h2>
-        <p class="lead page-lead">La cuenta de ${esc(name)}, cédula ${esc(documentId)}, ya está lista.</p>
+        <p class="lead page-lead">La cuenta de ${esc(name)} ya está lista. Al cobrar sale el siguiente código de barras.</p>
         <label class="field"><span>Nro. de referencia</span><input id="sale-reference" inputmode="numeric" maxlength="40" autocomplete="off" placeholder="Referencia del pago"></label>
         <h2 style="margin-top:8px">¿A dónde pasa esta venta?</h2>
         <div class="channel-actions">
@@ -1832,7 +1883,7 @@ function renderOrderAlerts() {
         <p class="stub-kicker">Factura ${esc(notice.numberLabel)}</p>
         <h2>Pedido nuevo</h2>
         <p class="order-who">${esc(notice.customerName)}</p>
-        <p class="hint">${esc(notice.customerDocument || '')}${notice.paymentReference ? ` · Ref. ${esc(notice.paymentReference)}` : ''}</p>
+        <p class="hint">${notice.paymentReference ? `Ref. ${esc(notice.paymentReference)}` : ''}</p>
         <p class="order-items">${esc(items)}</p>
         <p class="price-line">${chargedTotal(notice)}</p>
         <div class="row-actions">
@@ -1872,7 +1923,7 @@ async function pullNotices() {
     showNotices(notices);
     if (currentPath() === '/panel/barra') {
       const boardData = await api(`/api/invoices?q=${encodeURIComponent(state.barraQuery || '')}`, { soft: true });
-      state.barra = boardData.sales || [];
+      rememberBarraLists(boardData);
       const board = document.getElementById('barra-board');
       if (board) board.innerHTML = barraBoardHtml();
     }
@@ -1896,11 +1947,11 @@ function barraView() {
   const canCamera = canDetect && navigator.mediaDevices?.getUserMedia;
   return `
     <h2>Barra</h2>
-    <p class="lead page-lead">Escanea el QR o busca por nombre o número de factura. Elige los números y márcalos como entregados.</p>
+    <p class="lead page-lead">Escanea el código de barras o busca por nombre o número de factura. Elige los números y márcalos como entregados.</p>
     <section class="card">
       <label class="field"><span>Cliente o factura</span><input id="barra-search" type="search" placeholder="Nombre o número de factura" autocomplete="off" value="${esc(state.barraQuery || '')}"></label>
       <div class="row-actions">
-        ${canCamera ? '<button class="btn ghost" type="button" data-action="camera">Escanear QR</button>' : ''}
+        ${canCamera ? '<button class="btn ghost" type="button" data-action="camera">Escanear código</button>' : ''}
         ${canDetect ? '<label class="btn ghost file-btn">Subir foto<input type="file" accept="image/*" data-file="qr"></label>' : ''}
       </div>
       ${canCamera ? `<div class="camera" id="camera-box" hidden><video id="cam" playsinline autoplay muted></video><button class="btn ghost" type="button" data-action="stop-camera">Detener cámara</button></div>` : `<p class="hint">Este navegador no lee la cámara. Escribe el nombre o el número de la factura.</p>`}
@@ -1908,19 +1959,32 @@ function barraView() {
     </section>`;
 }
 
+function barraSaleButton(sale, done) {
+  const items = deliveryItems(sale);
+  const products = items.map((item) => done
+    ? `${item.quantity} ${item.productName}`
+    : `${item.remaining} de ${item.quantity} ${item.productName}`).join(' · ');
+  const status = sale.refundedAt ? 'Devuelta' : (done ? 'Entregada' : paymentLabel(sale.paymentMethod));
+  return `
+    <button class="sale-hit" type="button" data-action="open-barra" data-id="${sale.id}">
+      <strong>${esc(sale.customerName)} · ${esc(sale.numberLabel)}</strong>
+      <span>${esc(products)} · ${money(sale.totalCents)} · ${esc(status)}</span>
+    </button>`;
+}
+
 function barraBoardHtml() {
-  if (!state.barra.length) {
-    return `<div class="empty"><h3>${state.barraQuery ? 'Ninguna factura coincide' : 'Todavía no hay pedidos de barra'}</h3><p class="lead">${state.barraQuery ? 'Prueba con otro nombre o número.' : 'Cuando una venta pase a barra, aparece aquí.'}</p></div>`;
-  }
-  return state.barra.map((sale) => {
-    const products = deliveryItems(sale).map((item) => `${item.remaining} de ${item.quantity} ${item.productName}`).join(' · ');
-    const status = sale.refundedAt ? 'Devuelta' : paymentLabel(sale.paymentMethod);
-    return `
-      <button class="sale-hit" type="button" data-action="open-barra" data-id="${sale.id}">
-        <strong>${esc(sale.customerName)} · ${esc(sale.numberLabel)}</strong>
-        <span>${esc(products)} · ${money(sale.totalCents)} · ${esc(status)}</span>
-      </button>`;
-  }).join('');
+  const open = state.barra.length
+    ? state.barra.map((sale) => barraSaleButton(sale, false)).join('')
+    : `<div class="empty"><h3>${state.barraQuery ? 'Ninguna factura pendiente coincide' : 'No hay facturas por entregar'}</h3><p class="lead">${state.barraQuery ? 'Prueba con otro nombre o número.' : 'Cuando una venta pase a barra, aparece aquí hasta que se entregue completa.'}</p></div>`;
+  const history = state.barraHistory.length
+    ? state.barraHistory.map((sale) => barraSaleButton(sale, true)).join('')
+    : '<p class="hint">Todavía no hay facturas entregadas.</p>';
+  return `
+    <h3>Por entregar</h3>
+    ${open}
+    <h3 style="margin-top:18px">Historial</h3>
+    <p class="hint">Facturas que ya se entregaron por completo.</p>
+    ${history}`;
 }
 
 function unitMarkup(number, delivered, at) {
@@ -1982,7 +2046,8 @@ function barraModal() {
       <article class="modal card wide sheet-modal" data-stop>
         <p class="stub-kicker">Factura ${esc(sale.numberLabel)}</p>
         <h2 style="font-size:36px">${esc(sale.customerName)}</h2>
-        <p class="hint">${sale.customerDocument ? `Cédula ${esc(sale.customerDocument)}` : ''}${sale.paymentReference ? ` · Ref. ${esc(sale.paymentReference)}` : ''}</p>
+        ${barcodeSvg(sale.numberLabel)}
+        <p class="hint">${sale.paymentReference ? `Ref. ${esc(sale.paymentReference)}` : ''}</p>
         <p class="price-line">${sale.refundedAt ? 'Devuelta' : money(sale.totalCents)} · ${esc(paymentLabel(sale.paymentMethod))}</p>
         <div id="barra-lines">${barraLinesHtml(sale, true)}</div>
         <div class="sheet-legend">
@@ -2049,7 +2114,8 @@ function facturaBody(sale) {
   return `
     <p class="eyebrow">Factura ${esc(sale.numberLabel)}</p>
     <h1 style="font-size:42px">${esc(sale.customerName)}</h1>
-    <p class="price-line">${sale.customerDocument ? `Cédula ${esc(sale.customerDocument)}` : ''}${sale.paymentReference ? ` · Ref. ${esc(sale.paymentReference)}` : ''}</p>
+    ${barcodeSvg(sale.numberLabel)}
+    <p class="price-line">${sale.paymentReference ? `Ref. ${esc(sale.paymentReference)}` : ''}</p>
     <p class="lead">${sale.refundedAt ? 'Esta factura fue devuelta.' : `Entregado ${delivered} · Disponible ${pending}`}</p>
     ${barraLinesHtml(sale, false)}
     <div class="sheet-legend">
@@ -2421,7 +2487,7 @@ async function startCamera() {
   box.hidden = false;
   video.srcObject = stream;
   await video.play();
-  const detector = new BarcodeDetector({ formats: ['qr_code'] });
+  const detector = new BarcodeDetector({ formats: ['qr_code', 'code_128'] });
   const tick = async () => {
     if (!stream) return;
     try {
@@ -2446,11 +2512,11 @@ async function scanFile(file) {
     return;
   }
   try {
-    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+    const detector = new BarcodeDetector({ formats: ['qr_code', 'code_128'] });
     const bitmap = await createImageBitmap(file);
     const codes = await detector.detect(bitmap);
     if (!codes.length) {
-      toast('No se encontró un QR en la imagen.', 'bad');
+      toast('No se encontró un código en la imagen.', 'bad');
       return;
     }
     await onScan(codes[0].rawValue);
@@ -3139,7 +3205,7 @@ async function render() {
       state.barraSale = null;
       state.barraPicks = {};
       mount(shell(loading()));
-      state.barra = (await api(`/api/invoices?q=${encodeURIComponent(state.barraQuery || '')}`)).sales;
+      rememberBarraLists(await api(`/api/invoices?q=${encodeURIComponent(state.barraQuery || '')}`));
       if (token !== renderToken) return;
       mount(shell(barraView()));
       document.getElementById('barra-search')?.focus();
@@ -3750,21 +3816,15 @@ async function onClick(event) {
   }
   if (action === 'charge-sale') {
     const customerName = document.getElementById('pos-name')?.value.trim() || '';
-    const customerDocument = customerDocumentValue(document.getElementById('pos-document')?.value);
     if (customerName.length < 2) {
       toast('Escribe el nombre del cliente.', 'bad');
-      return;
-    }
-    if (!validCustomerDocument(customerDocument)) {
-      toast('Escribe la cédula del cliente.', 'bad');
-      document.getElementById('pos-document')?.focus();
       return;
     }
     if (!state.cart.length) {
       toast('Agrega un producto a la venta.', 'bad');
       return;
     }
-    mountModal(channelModal(customerName, customerDocument));
+    mountModal(channelModal(customerName));
     document.getElementById('sale-reference')?.focus();
     return;
   }
@@ -3774,9 +3834,8 @@ async function onClick(event) {
   }
   if (action === 'confirm-channel') {
     const customerName = document.getElementById('pos-name')?.value.trim() || '';
-    const customerDocument = customerDocumentValue(document.getElementById('pos-document')?.value);
     const paymentReference = String(document.getElementById('sale-reference')?.value || '').trim().replace(/\s+/g, '');
-    if (customerName.length < 2 || !validCustomerDocument(customerDocument) || !state.cart.length) {
+    if (customerName.length < 2 || !state.cart.length) {
       document.querySelector('[data-modal="channel"]')?.remove();
       toast('Revisa el cliente y los productos antes de cobrar.', 'bad');
       return;
@@ -3789,7 +3848,6 @@ async function onClick(event) {
     control.disabled = true;
     const body = new FormData();
     body.set('customerName', customerName);
-    body.set('customerDocument', customerDocument);
     body.set('paymentReference', paymentReference);
     body.set('paymentMethod', document.getElementById('pos-pay')?.value || 'efectivo');
     body.set('currency', state.saleCurrency === 'bs' ? 'bs' : 'usd');
@@ -3807,7 +3865,7 @@ async function onClick(event) {
       state.issuedSale = data.sale;
       document.querySelector('[data-modal="channel"]')?.remove();
       mount(shell(posView()));
-      toast(data.sale?.channel === 'detal' ? 'Venta al detal lista.' : 'Factura en barra. El QR abre la cuenta.');
+      toast(data.sale?.channel === 'detal' ? 'Venta al detal lista.' : 'Factura en barra. El código de barras sigue la secuencia.');
     } catch (error) {
       toast(error.message, 'bad');
       if (document.body.contains(control)) control.disabled = false;
@@ -3905,7 +3963,7 @@ async function onClick(event) {
       const data = await api(`/api/invoices/${control.dataset.id}/items/${control.dataset.item}/split`, { method: 'POST', body: {} });
       state.barraSale = data.sale;
       state.barraPicks = {};
-      state.barra = state.barra.map((sale) => (sale.id === data.sale.id ? { ...sale, ...data.sale } : sale));
+      placeBarraSale(data.sale);
       const board = document.getElementById('barra-board');
       if (board) board.innerHTML = barraBoardHtml();
       paintBarraModal();
@@ -3929,11 +3987,11 @@ async function onClick(event) {
       const data = await api(`/api/invoices/${control.dataset.id}/deliver`, { method: 'POST', body: { lines } });
       state.barraSale = data.sale;
       state.barraPicks = {};
-      state.barra = state.barra.map((sale) => (sale.id === data.sale.id ? { ...sale, ...data.sale } : sale));
+      placeBarraSale(data.sale);
       const board = document.getElementById('barra-board');
       if (board) board.innerHTML = barraBoardHtml();
       paintBarraModal();
-      toast('Entrega registrada.');
+      toast(saleIsOpen(data.sale) ? 'Entrega registrada.' : 'Factura completa. Quedó en el historial.');
     } catch (error) {
       toast(error.message, 'bad');
       if (document.body.contains(control)) control.disabled = false;
@@ -3947,7 +4005,7 @@ async function onClick(event) {
       const data = await api(`/api/invoices/${control.dataset.id}/refund`, { method: 'POST', body: {} });
       state.barraSale = data.sale;
       state.barraPicks = {};
-      state.barra = state.barra.map((sale) => (sale.id === data.sale.id ? { ...sale, ...data.sale } : sale));
+      placeBarraSale(data.sale);
       const board = document.getElementById('barra-board');
       if (board) board.innerHTML = barraBoardHtml();
       paintBarraModal();
@@ -4323,7 +4381,7 @@ document.addEventListener('input', (event) => {
       api(`/api/invoices?q=${encodeURIComponent(state.barraQuery || '')}`)
         .then((data) => {
           if (event.target.value !== state.barraQuery) return;
-          state.barra = data.sales;
+          rememberBarraLists(data);
           const board = document.getElementById('barra-board');
           if (board) board.innerHTML = barraBoardHtml();
         })
